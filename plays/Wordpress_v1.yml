@@ -1,316 +1,74 @@
 ---
-- name: Provision WordPress on Ubuntu 24.04 (Nginx + PHP-FPM + MariaDB)
+- name: Install WordPress using bertvv roles (RHEL/CentOS 7)
   hosts: all
   become: true
+  gather_facts: true
 
   vars:
-    # Helps avoid interpreter discovery warnings in some environments
-    ansible_python_interpreter: /usr/bin/python3
+    # Install roles into ./roles next to this playbook (Ansible finds ./roles by default)
+    roles_dir: "{{ playbook_dir }}/roles"
 
-    # ---- Customize these ----
-    domain_name: "example.com"
-    wp_site_title: "My WordPress Site"
-    wp_admin_user: "admin"
-    wp_admin_password: "ChangeMe-Admin-Strong"
-    wp_admin_email: "admin@example.com"
-
+    # --- Hardcoded DB creds (per your earlier request) ---
     wp_db_name: "wordpress"
     wp_db_user: "wpuser"
-    wp_db_password: "ChangeMe-DB-Strong"
+    wp_db_password: "ChangeMeOnceAndKeepSameEverywhere"
+    mariadb_root_password: "ChangeMeRootPassword"
 
-    # Install paths
-    web_root: "/var/www/{{ domain_name }}"
-    wp_root: "{{ web_root }}/public"
+  pre_tasks:
+    - name: Ensure roles directory exists on controller
+      ansible.builtin.file:
+        path: "{{ roles_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      run_once: true
 
-    # PHP details (Ubuntu 24.04 default is commonly PHP 8.3)
-    php_version: "8.3"
-    php_fpm_service: "php{{ php_version }}-fpm"
-    php_fpm_sock: "/run/php/php{{ php_version }}-fpm.sock"
-
-    # WordPress download
-    wordpress_url: "https://wordpress.org/latest.tar.gz"
-    wordpress_tmp_tar: "/tmp/wordpress-latest.tar.gz"
-    wordpress_tmp_dir: "/tmp/wordpress-extract"
-
-    # Optional: install wp-cli for automated site install
-    install_wp_cli: true
-    wp_cli_path: "/usr/local/bin/wp"
-
-  handlers:
-    - name: reload nginx
-      ansible.builtin.service:
-        name: nginx
-        state: reloaded
-
-    - name: restart php-fpm
-      ansible.builtin.service:
-        name: "{{ php_fpm_service }}"
-        state: restarted
-
-    - name: restart mariadb
-      ansible.builtin.service:
-        name: mariadb
-        state: restarted
-
-  tasks:
-    - name: Ensure Ubuntu 24.04 (Noble)
-      ansible.builtin.assert:
-        that:
-          - ansible_facts.distribution == "Ubuntu"
-          - ansible_facts.distribution_version is version("24.04", ">=")
-        fail_msg: "This playbook is intended for Ubuntu 24.04+."
-
-    - name: Update apt cache
-      ansible.builtin.apt:
-        update_cache: true
-        cache_valid_time: 3600
-
-    - name: Install base packages
-      ansible.builtin.apt:
-        name:
-          - nginx
-          - mariadb-server
-          - curl
-          - tar
-          - unzip
-          - ca-certificates
-        state: present
-
-    - name: Install PHP packages
-      ansible.builtin.apt:
-        name:
-          - "php{{ php_version }}-fpm"
-          - "php{{ php_version }}-mysql"
-          - "php{{ php_version }}-curl"
-          - "php{{ php_version }}-gd"
-          - "php{{ php_version }}-mbstring"
-          - "php{{ php_version }}-xml"
-          - "php{{ php_version }}-zip"
-          - "php{{ php_version }}-intl"
-        state: present
-
-    - name: Ensure services are started and enabled
-      ansible.builtin.service:
-        name: "{{ item }}"
-        state: started
-        enabled: true
+    - name: Check if required roles are already installed (on controller)
+      ansible.builtin.stat:
+        path: "{{ roles_dir }}/{{ item }}"
       loop:
-        - nginx
-        - mariadb
-        - "{{ php_fpm_service }}"
+        - "bertvv.httpd"
+        - "bertvv.mariadb"
+        - "bertvv.wordpress"
+      register: role_stats
+      delegate_to: localhost
+      run_once: true
 
-    # --------------------
-    # MariaDB DB + user
-    # (Uses unix socket root auth default on Ubuntu)
-    # --------------------
-    - name: Create WordPress database (if not exists)
+    - name: Install missing roles from Ansible Galaxy (on controller)
       ansible.builtin.command: >
-        mysql -e "CREATE DATABASE IF NOT EXISTS \`{{ wp_db_name }}\`
-        DEFAULT CHARACTER SET utf8mb4
-        COLLATE utf8mb4_unicode_ci;"
-      changed_when: false
-
-    - name: Create WordPress DB user (if not exists) and grant privileges
-      ansible.builtin.shell: |
-        set -euo pipefail
-        mysql -e "CREATE USER IF NOT EXISTS '{{ wp_db_user }}'@'localhost' IDENTIFIED BY '{{ wp_db_password }}';"
-        mysql -e "GRANT ALL PRIVILEGES ON \`{{ wp_db_name }}\`.* TO '{{ wp_db_user }}'@'localhost';"
-        mysql -e "FLUSH PRIVILEGES;"
+        ansible-galaxy role install -p "{{ roles_dir }}" {{ item.item }}
       args:
-        executable: /bin/bash
-      changed_when: false
+        creates: "{{ roles_dir }}/{{ item.item }}"
+      loop: "{{ role_stats.results }}"
+      when: not item.stat.exists
+      delegate_to: localhost
+      run_once: true
 
-    # --------------------
-    # Web root + WordPress
-    # --------------------
-    - name: Create web root directories
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: directory
-        owner: www-data
-        group: www-data
-        mode: "0755"
-      loop:
-        - "{{ web_root }}"
-        - "{{ wp_root }}"
+  roles:
+    # 1) MariaDB server + create DB/user for WordPress
+    - role: bertvv.mariadb
+      vars:
+        mariadb_root_password: "{{ mariadb_root_password }}"
+        mariadb_databases:
+          - name: "{{ wp_db_name }}"
+            collation: "utf8mb4_unicode_ci"
+            encoding: "utf8mb4"
+        mariadb_users:
+          - name: "{{ wp_db_user }}"
+            password: "{{ wp_db_password }}"
+            host: "localhost"
+            priv: "{{ wp_db_name }}.*:ALL"
 
-    - name: Download WordPress tarball
-      ansible.builtin.get_url:
-        url: "{{ wordpress_url }}"
-        dest: "{{ wordpress_tmp_tar }}"
-        mode: "0644"
-
-    - name: Recreate temp extract dir
-      ansible.builtin.file:
-        path: "{{ wordpress_tmp_dir }}"
-        state: directory
-        mode: "0755"
-
-    - name: Extract WordPress
-      ansible.builtin.unarchive:
-        src: "{{ wordpress_tmp_tar }}"
-        dest: "{{ wordpress_tmp_dir }}"
-        remote_src: true
-        creates: "{{ wordpress_tmp_dir }}/wordpress"
-
-    - name: Sync WordPress into web root (first time)
-      ansible.builtin.copy:
-        src: "{{ wordpress_tmp_dir }}/wordpress/"
-        dest: "{{ wp_root }}/"
-        remote_src: true
-        owner: www-data
-        group: www-data
-        mode: preserve
-
-    - name: Ensure wp-content permissions
-      ansible.builtin.file:
-        path: "{{ wp_root }}/wp-content"
-        state: directory
-        owner: www-data
-        group: www-data
-        mode: "0755"
-
-    # --------------------
-    # wp-config.php (inline, no template file)
-    # --------------------
-    - name: Create wp-config.php if missing
-      ansible.builtin.copy:
-        dest: "{{ wp_root }}/wp-config.php"
-        owner: www-data
-        group: www-data
-        mode: "0640"
-        force: false
-        content: |
-          <?php
-          define( 'DB_NAME', '{{ wp_db_name }}' );
-          define( 'DB_USER', '{{ wp_db_user }}' );
-          define( 'DB_PASSWORD', '{{ wp_db_password }}' );
-          define( 'DB_HOST', 'localhost' );
-          define( 'DB_CHARSET', 'utf8mb4' );
-          define( 'DB_COLLATE', '' );
-
-          // Authentication Unique Keys and Salts.
-          define( 'AUTH_KEY',         '{{ lookup("password", "/dev/null length=64 chars=ascii_letters,digits") }}' );
-          define( 'SECURE_AUTH_KEY',  '{{ lookup("password", "/dev/null length=64 chars=ascii_letters,digits") }}' );
-          define( 'LOGGED_IN_KEY',    '{{ lookup("password", "/dev/null length=64 chars=ascii_letters,digits") }}' );
-          define( 'NONCE_KEY',        '{{ lookup("password", "/dev/null length=64 chars=ascii_letters,digits") }}' );
-          define( 'AUTH_SALT',        '{{ lookup("password", "/dev/null length=64 chars=ascii_letters,digits") }}' );
-          define( 'SECURE_AUTH_SALT', '{{ lookup("password", "/dev/null length=64 chars=ascii_letters,digits") }}' );
-          define( 'LOGGED_IN_SALT',   '{{ lookup("password", "/dev/null length=64 chars=ascii_letters,digits") }}' );
-          define( 'NONCE_SALT',       '{{ lookup("password", "/dev/null length=64 chars=ascii_letters,digits") }}' );
-
-          $table_prefix = 'wp_';
-
-          define( 'WP_DEBUG', false );
-
-          if ( ! defined( 'ABSPATH' ) ) {
-            define( 'ABSPATH', __DIR__ . '/' );
-          }
-          require_once ABSPATH . 'wp-settings.php';
-
-    # --------------------
-    # Nginx site config (inline)
-    # --------------------
-    - name: Create Nginx server block
-      ansible.builtin.copy:
-        dest: "/etc/nginx/sites-available/{{ domain_name }}"
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          server {
-              listen 80;
-              listen [::]:80;
-
-              server_name {{ domain_name }} www.{{ domain_name }};
-              root {{ wp_root }};
-              index index.php index.html;
-
-              client_max_body_size 64M;
-
-              location / {
-                  try_files $uri $uri/ /index.php?$args;
-              }
-
-              location ~ \.php$ {
-                  include snippets/fastcgi-php.conf;
-                  fastcgi_pass unix:{{ php_fpm_sock }};
-              }
-
-              location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
-                  expires max;
-                  log_not_found off;
-              }
-
-              location ~ /\.ht {
-                  deny all;
-              }
-          }
-      notify: reload nginx
-
-    - name: Enable Nginx site
-      ansible.builtin.file:
-        src: "/etc/nginx/sites-available/{{ domain_name }}"
-        dest: "/etc/nginx/sites-enabled/{{ domain_name }}"
-        state: link
-      notify: reload nginx
-
-    - name: Disable default Nginx site (if present)
-      ansible.builtin.file:
-        path: "/etc/nginx/sites-enabled/default"
-        state: absent
-      notify: reload nginx
-
-    - name: Validate Nginx config
-      ansible.builtin.command: nginx -t
-      changed_when: false
-
-    - name: Reload Nginx
-      ansible.builtin.service:
-        name: nginx
-        state: reloaded
-
-    # --------------------
-    # Optional: WP-CLI automated installation (still single-file)
-    # --------------------
-    - name: Install wp-cli (optional)
-      ansible.builtin.get_url:
-        url: "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar"
-        dest: "{{ wp_cli_path }}"
-        mode: "0755"
-      when: install_wp_cli
-
-    - name: Ensure WordPress is installed (wp-cli)
-      ansible.builtin.shell: |
-        set -euo pipefail
-        cd "{{ wp_root }}"
-        if ! sudo -u www-data {{ wp_cli_path }} core is-installed --allow-root >/dev/null 2>&1; then
-          sudo -u www-data {{ wp_cli_path }} core install \
-            --url="http://{{ domain_name }}" \
-            --title="{{ wp_site_title }}" \
-            --admin_user="{{ wp_admin_user }}" \
-            --admin_password="{{ wp_admin_password }}" \
-            --admin_email="{{ wp_admin_email }}" \
-            --skip-email \
-            --allow-root
-        fi
-      args:
-        executable: /bin/bash
-      when: install_wp_cli
-      changed_when: false
-
-    - name: Final ownership fix
-      ansible.builtin.file:
-        path: "{{ wp_root }}"
-        state: directory
-        recurse: true
-        owner: www-data
-        group: www-data
-      changed_when: false
-
-    - name: Done
-      ansible.builtin.debug:
-        msg:
-          - "WordPress should be available at: http://{{ domain_name }}/"
-          - "Admin: http://{{ domain_name }}/wp-admin/"
-          - "DB: {{ wp_db_name }} user={{ wp_db_user }}"
+    # 2) WordPress (installs deps, downloads WP tarball, configures Apache + wp-config.php)
+    - role: bertvv.wordpress
+      vars:
+        wordpress_database_host: "localhost"
+        wordpress_database: "{{ wp_db_name }}"
+        wordpress_user: "{{ wp_db_user }}"
+        wordpress_password: "{{ wp_db_password }}"
+        # Optional knobs supported by the role:
+        wordpress_allow_file_mods: true
+        wordpress_automatic_updates: false
+        wordpress_debug: false
+        wordpress_force_ssl: false
+        # wordpress_version: "6.0.2"   # role default; set if you want a specific version
