@@ -1,5 +1,5 @@
 ---
-- name: Provision WordPress on Ubuntu (Single File, Morpheus Safe)
+- name: Provision WordPress on Ubuntu (Single File - FIXED list install)
   hosts: all
   become: true
   gather_facts: true
@@ -11,11 +11,13 @@
     wp_db_root_password: root_pass_123
     wp_install_dir: /var/www/wordpress
 
-    packages:
+    base_packages:
       - nginx
       - mariadb-server
       - unzip
       - curl
+
+    php_packages:
       - php-fpm
       - php-mysql
       - php-curl
@@ -37,9 +39,14 @@
         update_cache: true
         cache_valid_time: 3600
 
-    - name: Install required packages
+    - name: Install base packages (NO nested lists)
       apt:
-        name: "{{ packages }}"
+        name: "{{ base_packages }}"
+        state: present
+
+    - name: Install PHP packages (NO nested lists)
+      apt:
+        name: "{{ php_packages }}"
         state: present
 
     - name: Ensure MariaDB is started
@@ -48,7 +55,7 @@
         state: started
         enabled: true
 
-    - name: Secure MariaDB root user
+    - name: Secure MariaDB root user (idempotent marker)
       shell: |
         mysql -u root <<EOF
         ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ wp_db_root_password }}';
@@ -56,15 +63,11 @@
         DROP DATABASE IF EXISTS test;
         FLUSH PRIVILEGES;
         EOF
+        touch /root/.mariadb-secured
       args:
         creates: /root/.mariadb-secured
 
-    - name: Mark MariaDB as secured
-      file:
-        path: /root/.mariadb-secured
-        state: touch
-
-    - name: Create WordPress database
+    - name: Create WordPress database and user
       shell: |
         mysql -u root -p{{ wp_db_root_password }} <<EOF
         CREATE DATABASE IF NOT EXISTS {{ wp_db_name }};
@@ -77,6 +80,7 @@
       get_url:
         url: https://wordpress.org/latest.tar.gz
         dest: /tmp/wordpress.tar.gz
+        mode: '0644'
 
     - name: Extract WordPress
       unarchive:
