@@ -1,5 +1,5 @@
 ---
-- name: Provision WordPress on Ubuntu (Morpheus Single File, Safe)
+- name: Provision WordPress on Ubuntu (Morpheus Safe, Single File)
   hosts: all
   become: true
   gather_facts: true
@@ -11,6 +11,19 @@
     wp_db_password: wp_password_123
     wp_db_host: localhost
 
+    base_packages:
+      - nginx
+      - mariadb-server
+      - unzip
+      - curl
+      - php-fpm
+      - php-mysql
+      - php-curl
+      - php-gd
+      - php-mbstring
+      - php-xml
+      - php-zip
+
   tasks:
 
     - name: Ensure Ubuntu OS
@@ -19,34 +32,14 @@
           - ansible_distribution == "Ubuntu"
         fail_msg: "This playbook supports Ubuntu only"
 
-    - name: Set PHP packages based on Ubuntu version
-      set_fact:
-        php_packages: >-
-          {{
-            [
-              'php-fpm',
-              'php-mysql',
-              'php-curl',
-              'php-gd',
-              'php-mbstring',
-              'php-xml',
-              'php-zip'
-            ]
-          }}
-
     - name: Update apt cache
       apt:
         update_cache: true
         cache_valid_time: 3600
 
-    - name: Install required packages
+    - name: Install required packages (FIXED)
       apt:
-        name:
-          - nginx
-          - mariadb-server
-          - unzip
-          - curl
-          - "{{ php_packages }}"
+        name: "{{ base_packages }}"
         state: present
 
     - name: Ensure MariaDB is running
@@ -55,7 +48,7 @@
         state: started
         enabled: true
 
-    - name: Create WordPress database
+    - name: Create WordPress database and user
       shell: |
         mysql -e "CREATE DATABASE IF NOT EXISTS {{ wp_db_name }};
         CREATE USER IF NOT EXISTS '{{ wp_db_user }}'@'localhost' IDENTIFIED BY '{{ wp_db_password }}';
@@ -156,7 +149,7 @@
         path: /etc/nginx/sites-enabled/default
         state: absent
 
-    - name: Restart Nginx and PHP-FPM
+    - name: Restart services
       service:
         name: "{{ item }}"
         state: restarted
