@@ -1,15 +1,15 @@
 ---
-- name: Provision WordPress on Ubuntu (Morpheus Safe, Single File)
+- name: Provision WordPress on Ubuntu (Single File, Morpheus Safe)
   hosts: all
   become: true
   gather_facts: true
 
   vars:
-    wp_root: /var/www/wordpress
-    wp_db: wordpress
+    wp_db_name: wordpress
     wp_db_user: wpuser
     wp_db_password: wp_password_123
     wp_db_root_password: root_password_123
+    wp_install_dir: /var/www/html/wordpress
 
   tasks:
 
@@ -17,15 +17,14 @@
       assert:
         that:
           - ansible_distribution == "Ubuntu"
-        fail_msg: "This playbook only supports Ubuntu"
 
-    - name: Set PHP version based on Ubuntu release (NO WHITESPACE)
+    - name: Set PHP version based on Ubuntu release
       set_fact:
-        php_version: "{{ '8.3' if ansible_distribution_version is version('24.04', '>=') else '8.1' if ansible_distribution_version is version('22.04', '>=') else '7.4' }}"
+        php_version: "{{ '8.1' if ansible_distribution_version is version('22.04', '<') else '8.3' }}"
 
     - name: Update apt cache
       apt:
-        update_cache: true
+        update_cache: yes
         cache_valid_time: 3600
 
     - name: Install required packages
@@ -33,15 +32,14 @@
         name:
           - nginx
           - mariadb-server
-          - "php{{ php_version }}-fpm"
-          - "php{{ php_version }}-mysql"
-          - "php{{ php_version }}-curl"
-          - "php{{ php_version }}-gd"
-          - "php{{ php_version }}-mbstring"
-          - "php{{ php_version }}-xml"
-          - "php{{ php_version }}-zip"
+          - php{{ php_version }}-fpm
+          - php{{ php_version }}-mysql
+          - php{{ php_version }}-xml
+          - php{{ php_version }}-mbstring
+          - php{{ php_version }}-curl
+          - php{{ php_version }}-gd
+          - php{{ php_version }}-zip
           - unzip
-          - curl
         state: present
 
     - name: Ensure MariaDB is running
@@ -50,7 +48,7 @@
         state: started
         enabled: true
 
-    - name: Set MariaDB root password
+    - name: Set MariaDB root password (idempotent)
       shell: |
         mysql -u root <<EOF
         ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ wp_db_root_password }}';
@@ -59,67 +57,61 @@
       args:
         creates: /root/.mysql_root_configured
 
-    - name: Mark MariaDB root password configured
+    - name: Mark MariaDB root password as set
       file:
         path: /root/.mysql_root_configured
         state: touch
 
     - name: Create WordPress database
       shell: |
-        mysql -u root -p{{ wp_db_root_password }} -e "CREATE DATABASE IF NOT EXISTS {{ wp_db }};"
+        mysql -u root -p{{ wp_db_root_password }} -e "CREATE DATABASE IF NOT EXISTS {{ wp_db_name }};"
 
-    - name: Create WordPress DB user
+    - name: Create WordPress database user
       shell: |
         mysql -u root -p{{ wp_db_root_password }} -e "
         CREATE USER IF NOT EXISTS '{{ wp_db_user }}'@'localhost' IDENTIFIED BY '{{ wp_db_password }}';
-        GRANT ALL PRIVILEGES ON {{ wp_db }}.* TO '{{ wp_db_user }}'@'localhost';
+        GRANT ALL PRIVILEGES ON {{ wp_db_name }}.* TO '{{ wp_db_user }}'@'localhost';
         FLUSH PRIVILEGES;
         "
 
-    - name: Create web root
-      file:
-        path: "{{ wp_root }}"
-        state: directory
-        owner: www-data
-        group: www-data
-        mode: "0755"
-
     - name: Download WordPress
       get_url:
-        url: https://wordpress.org/latest.tar.gz
-        dest: /tmp/wordpress.tar.gz
+        url: https://wordpress.org/latest.zip
+        dest: /tmp/wordpress.zip
+        mode: '0644'
 
     - name: Extract WordPress
       unarchive:
-        src: /tmp/wordpress.tar.gz
-        dest: /var/www/
-        remote_src: true
-        creates: "{{ wp_root }}/wp-config-sample.php"
+        src: /tmp/wordpress.zip
+        dest: /var/www/html
+        remote_src: yes
+        creates: "{{ wp_install_dir }}"
 
-    - name: Set ownership
+    - name: Set permissions
       file:
-        path: "{{ wp_root }}"
+        path: "{{ wp_install_dir }}"
         owner: www-data
         group: www-data
-        recurse: true
+        recurse: yes
 
     - name: Create wp-config.php
       copy:
-        dest: "{{ wp_root }}/wp-config.php"
+        dest: "{{ wp_install_dir }}/wp-config.php"
         owner: www-data
         group: www-data
-        mode: "0644"
+        mode: '0644'
         content: |
           <?php
-          define('DB_NAME', '{{ wp_db }}');
+          define('DB_NAME', '{{ wp_db_name }}');
           define('DB_USER', '{{ wp_db_user }}');
           define('DB_PASSWORD', '{{ wp_db_password }}');
           define('DB_HOST', 'localhost');
           define('DB_CHARSET', 'utf8');
           define('DB_COLLATE', '');
+          $table_prefix = 'wp_';
           define('WP_DEBUG', false);
           if ( !defined('ABSPATH') )
-            define('ABSPATH', dirname(__FILE__) . '/');
+              define('ABSPATH', dirname(__FILE__) . '/');
           require_once(ABSPATH . 'wp-settings.php');
 
     - name: Configure Nginx for WordPress
@@ -127,22 +119,22 @@
         dest: /etc/nginx/sites-available/wordpress
         content: |
           server {
-            listen 80;
-            root {{ wp_root }};
-            index index.php index.html;
+              listen 80;
+              root {{ wp_install_dir }};
+              index index.php index.html;
 
-            location / {
-              try_files $uri $uri/ /index.php?$args;
-            }
+              location / {
+                  try_files $uri $uri/ /index.php?$args;
+              }
 
-            location ~ \.php$ {
-              include snippets/fastcgi-php.conf;
-              fastcgi_pass unix:/run/php/php{{ php_version }}-fpm.sock;
-            }
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass unix:/run/php/php{{ php_version }}-fpm.sock;
+              }
 
-            location ~ /\.ht {
-              deny all;
-            }
+              location ~ /\.ht {
+                  deny all;
+              }
           }
 
     - name: Enable WordPress site
@@ -150,21 +142,17 @@
         src: /etc/nginx/sites-available/wordpress
         dest: /etc/nginx/sites-enabled/wordpress
         state: link
-        force: true
+        force: yes
 
     - name: Remove default nginx site
       file:
         path: /etc/nginx/sites-enabled/default
         state: absent
 
-    - name: Restart PHP-FPM
+    - name: Restart services
       service:
-        name: "php{{ php_version }}-fpm"
+        name: "{{ item }}"
         state: restarted
-        enabled: true
-
-    - name: Restart Nginx
-      service:
-        name: nginx
-        state: restarted
-        enabled: true
+      loop:
+        - nginx
+        - php{{ php_version }}-fpm
