@@ -1,125 +1,190 @@
 ---
-- name: Provision WordPress on Ubuntu (Single File - FIXED apt + MariaDB root auth)
+- name: Provision WordPress on Ubuntu 24.04 (Nginx + PHP-FPM + MariaDB)
   hosts: all
   become: true
-  gather_facts: true
 
   vars:
     wp_db_name: wordpress
     wp_db_user: wpuser
-    wp_db_password: wp_pass_123
-    # Optional fallback only (used only if socket login fails)
-    wp_db_root_password: root_pass_123
+    wp_db_pass: wp_pass_123
 
-    wp_install_dir: /var/www/wordpress
+    wp_root: /var/www/wordpress
+    nginx_site_name: wordpress
+    nginx_site_available: "/etc/nginx/sites-available/{{ nginx_site_name }}"
+    nginx_site_enabled: "/etc/nginx/sites-enabled/{{ nginx_site_name }}"
+    server_name: "_"   # change to your DNS name if you have one (e.g. example.com)
 
-    base_packages:
-      - nginx
-      - mariadb-server
-      - mariadb-client
-      - unzip
-      - curl
+    # Ubuntu 24.04 default is PHP 8.3
+    php_fpm_service: php8.3-fpm
+    php_fpm_sock: /run/php/php8.3-fpm.sock
 
-    php_packages:
-      - php-fpm
-      - php-mysql
-      - php-curl
-      - php-gd
-      - php-mbstring
-      - php-xml
-      - php-zip
+  handlers:
+    - name: reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
 
   tasks:
     - name: Ensure Ubuntu OS
-      assert:
+      ansible.builtin.assert:
         that:
-          - ansible_distribution == "Ubuntu"
-        fail_msg: "This playbook supports Ubuntu only"
+          - ansible_facts['distribution'] == "Ubuntu"
+          - ansible_facts['distribution_major_version']|int == 24
+        fail_msg: "This playbook is intended for Ubuntu 24.04.x"
 
     - name: Update apt cache
-      apt:
+      ansible.builtin.apt:
         update_cache: true
         cache_valid_time: 3600
 
-    - name: Install base packages (flat list)
-      apt:
-        name: "{{ base_packages }}"
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - mariadb-server
+          - unzip
+          - curl
+          - tar
         state: present
 
-    - name: Install PHP packages (flat list)
-      apt:
-        name: "{{ php_packages }}"
+    - name: Install PHP packages
+      ansible.builtin.apt:
+        name:
+          - php-fpm
+          - php-mysql
+          - php-curl
+          - php-gd
+          - php-mbstring
+          - php-xml
+          - php-zip
         state: present
 
-    - name: Ensure MariaDB is started
-      service:
-        name: mariadb
+    - name: Ensure services are started and enabled
+      ansible.builtin.service:
+        name: "{{ item }}"
         state: started
         enabled: true
+      loop:
+        - mariadb
+        - nginx
+        - "{{ php_fpm_service }}"
 
-    - name: Check MariaDB root socket login (no password)
-      command: mysql -u root -e "SELECT 1;"
-      register: mysql_root_socket
-      ignore_errors: true
-      changed_when: false
+    # Optional "secure" basics (socket auth, idempotent marker)
+    - name: Secure MariaDB basics (remove anon users/test DB) - idempotent marker
+      ansible.builtin.shell: |
+        mysql <<'EOF'
+        DELETE FROM mysql.user WHERE User='';
+        DROP DATABASE IF EXISTS test;
+        FLUSH PRIVILEGES;
+        EOF
+        touch /root/.mariadb-secured
+      args:
+        creates: /root/.mariadb-secured
 
-    - name: Set mysql command to use (socket preferred, password fallback)
-      set_fact:
-        mysql_cmd: >-
-          {{ 'mysql -u root'
-             if (mysql_root_socket.rc | default(1)) == 0
-             else 'mysql -u root -p' ~ wp_db_root_password }}
-
-    - name: Create WordPress DB and user (works with socket or password)
-      shell: |
-        {{ mysql_cmd }} <<'EOF'
+    - name: Create WordPress database and user (socket auth; no root password)
+      ansible.builtin.shell: |
+        mysql <<'EOF'
         CREATE DATABASE IF NOT EXISTS {{ wp_db_name }};
-        CREATE USER IF NOT EXISTS '{{ wp_db_user }}'@'localhost' IDENTIFIED BY '{{ wp_db_password }}';
+        CREATE USER IF NOT EXISTS '{{ wp_db_user }}'@'localhost' IDENTIFIED BY '{{ wp_db_pass }}';
         GRANT ALL PRIVILEGES ON {{ wp_db_name }}.* TO '{{ wp_db_user }}'@'localhost';
         FLUSH PRIVILEGES;
         EOF
 
     - name: Download WordPress
-      get_url:
+      ansible.builtin.get_url:
         url: https://wordpress.org/latest.tar.gz
         dest: /tmp/wordpress.tar.gz
-        mode: '0644'
+        mode: "0644"
 
-    - name: Extract WordPress
-      unarchive:
+    - name: Extract WordPress to /var/www
+      ansible.builtin.unarchive:
         src: /tmp/wordpress.tar.gz
-        dest: /var/www/
+        dest: /var/www
         remote_src: true
+        creates: "{{ wp_root }}/wp-settings.php"
 
-    - name: Set ownership
-      file:
-        path: "{{ wp_install_dir }}"
+    - name: Ensure WordPress directory ownership
+      ansible.builtin.file:
+        path: "{{ wp_root }}"
+        state: directory
         owner: www-data
         group: www-data
         recurse: true
 
-    - name: Configure wp-config.php
-      copy:
-        dest: "{{ wp_install_dir }}/wp-config.php"
+    - name: Create wp-config.php if missing
+      ansible.builtin.copy:
+        dest: "{{ wp_root }}/wp-config.php"
         owner: www-data
         group: www-data
-        mode: '0644'
+        mode: "0640"
+        force: false
         content: |
           <?php
           define('DB_NAME', '{{ wp_db_name }}');
           define('DB_USER', '{{ wp_db_user }}');
-          define('DB_PASSWORD', '{{ wp_db_password }}');
+          define('DB_PASSWORD', '{{ wp_db_pass }}');
           define('DB_HOST', 'localhost');
           define('DB_CHARSET', 'utf8');
           define('DB_COLLATE', '');
+
+          define('AUTH_KEY',         'put-your-unique-phrase-here');
+          define('SECURE_AUTH_KEY',  'put-your-unique-phrase-here');
+          define('LOGGED_IN_KEY',    'put-your-unique-phrase-here');
+          define('NONCE_KEY',        'put-your-unique-phrase-here');
+          define('AUTH_SALT',        'put-your-unique-phrase-here');
+          define('SECURE_AUTH_SALT', 'put-your-unique-phrase-here');
+          define('LOGGED_IN_SALT',   'put-your-unique-phrase-here');
+          define('NONCE_SALT',       'put-your-unique-phrase-here');
+
           $table_prefix = 'wp_';
           define('WP_DEBUG', false);
-          if ( !defined('ABSPATH') )
-            define('ABSPATH', dirname(__FILE__) . '/');
-          require_once(ABSPATH . 'wp-settings.php');
 
-    - name: Ensure Nginx is started
-      service:
-        name: nginx
-        state: started
-        enabled: true
+          if ( !defined('ABSPATH') ) {
+            define('ABSPATH', __DIR__ . '/');
+          }
+          require_once ABSPATH . 'wp-settings.php';
+
+    - name: Configure Nginx site for WordPress
+      ansible.builtin.copy:
+        dest: "{{ nginx_site_available }}"
+        mode: "0644"
+        content: |
+          server {
+              listen 80;
+              server_name {{ server_name }};
+
+              root {{ wp_root }};
+              index index.php index.html;
+
+              location / {
+                  try_files $uri $uri/ /index.php?$args;
+              }
+
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass unix:{{ php_fpm_sock }};
+              }
+
+              location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
+                  expires max;
+                  log_not_found off;
+              }
+          }
+      notify: reload nginx
+
+    - name: Disable default Nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: reload nginx
+
+    - name: Enable WordPress Nginx site
+      ansible.builtin.file:
+        src: "{{ nginx_site_available }}"
+        dest: "{{ nginx_site_enabled }}"
+        state: link
+      notify: reload nginx
+
+    - name: Test Nginx config
+      ansible.builtin.command: nginx -t
+      changed_when: false
