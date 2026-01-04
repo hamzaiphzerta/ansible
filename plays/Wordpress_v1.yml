@@ -1,5 +1,5 @@
 ---
-- name: Provision WordPress on Ubuntu (Single File / Morpheus)
+- name: Provision WordPress on Ubuntu (Morpheus Safe)
   hosts: all
   become: true
 
@@ -16,19 +16,19 @@
 
   pre_tasks:
     - name: Ensure Ubuntu
-      ansible.builtin.assert:
+      assert:
         that:
           - ansible_distribution == "Ubuntu"
         fail_msg: "This playbook supports Ubuntu only."
 
     - name: Update apt cache
-      ansible.builtin.apt:
+      apt:
         update_cache: true
         cache_valid_time: 3600
 
   tasks:
     - name: Install required packages
-      ansible.builtin.apt:
+      apt:
         name:
           - nginx
           - mariadb-server
@@ -44,7 +44,7 @@
         state: present
 
     - name: Ensure services are running
-      ansible.builtin.service:
+      service:
         name: "{{ item }}"
         state: started
         enabled: true
@@ -54,32 +54,28 @@
         - php{{ php_version }}-fpm
 
     - name: Set MariaDB root password
-      community.mysql.mysql_user:
-        name: root
-        password: "{{ db_root_password }}"
-        login_unix_socket: /var/run/mysqld/mysqld.sock
-        check_implicit_admin: true
+      shell: |
+        mysql -u root <<EOF
+        ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_root_password }}';
+        FLUSH PRIVILEGES;
+        EOF
+      args:
+        executable: /bin/bash
       ignore_errors: true
 
-    - name: Create WordPress database
-      community.mysql.mysql_db:
-        name: "{{ db_name }}"
-        state: present
-        login_user: root
-        login_password: "{{ db_root_password }}"
-
-    - name: Create WordPress database user
-      community.mysql.mysql_user:
-        name: "{{ db_user }}"
-        password: "{{ db_password }}"
-        priv: "{{ db_name }}.*:ALL"
-        host: "%"
-        state: present
-        login_user: root
-        login_password: "{{ db_root_password }}"
+    - name: Create WordPress database and user
+      shell: |
+        mysql -u root -p'{{ db_root_password }}' <<EOF
+        CREATE DATABASE IF NOT EXISTS {{ db_name }};
+        CREATE USER IF NOT EXISTS '{{ db_user }}'@'%' IDENTIFIED BY '{{ db_password }}';
+        GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_user }}'@'%';
+        FLUSH PRIVILEGES;
+        EOF
+      args:
+        executable: /bin/bash
 
     - name: Create web root
-      ansible.builtin.file:
+      file:
         path: "{{ wp_root }}"
         state: directory
         owner: www-data
@@ -87,13 +83,13 @@
         mode: "0755"
 
     - name: Download and extract WordPress
-      ansible.builtin.shell: |
+      shell: |
         curl -s https://wordpress.org/latest.tar.gz | tar -xz -C /tmp
       args:
         creates: /tmp/wordpress
 
     - name: Deploy WordPress files
-      ansible.builtin.copy:
+      copy:
         src: /tmp/wordpress/
         dest: "{{ wp_root }}"
         owner: www-data
@@ -101,8 +97,8 @@
         mode: "0755"
         remote_src: true
 
-    - name: Create wp-config.php (inline)
-      ansible.builtin.copy:
+    - name: Create wp-config.php
+      copy:
         dest: "{{ wp_root }}/wp-config.php"
         owner: www-data
         group: www-data
@@ -128,8 +124,8 @@
           require_once ABSPATH . 'wp-settings.php';
           ?>
 
-    - name: Configure NGINX WordPress site (inline)
-      ansible.builtin.copy:
+    - name: Configure NGINX site
+      copy:
         dest: /etc/nginx/sites-available/wordpress
         content: |
           server {
@@ -156,19 +152,19 @@
       notify: Reload NGINX
 
     - name: Enable NGINX site
-      ansible.builtin.file:
+      file:
         src: /etc/nginx/sites-available/wordpress
         dest: /etc/nginx/sites-enabled/wordpress
         state: link
         force: true
 
     - name: Remove default NGINX site
-      ansible.builtin.file:
+      file:
         path: /etc/nginx/sites-enabled/default
         state: absent
 
   handlers:
     - name: Reload NGINX
-      ansible.builtin.service:
+      service:
         name: nginx
         state: reloaded
