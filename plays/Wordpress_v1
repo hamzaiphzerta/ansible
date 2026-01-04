@@ -1,1 +1,174 @@
+---
+- name: Provision WordPress on Ubuntu (Single File / Morpheus)
+  hosts: all
+  become: true
 
+  vars:
+    wp_domain: "example.com"
+    wp_root: "/var/www/wordpress"
+
+    db_name: "wordpress"
+    db_user: "wpuser"
+    db_password: "StrongPassword123!"
+    db_root_password: "RootDBPassword123!"
+
+    php_version: "8.1"
+
+  pre_tasks:
+    - name: Ensure Ubuntu
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+        fail_msg: "This playbook supports Ubuntu only."
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - mariadb-server
+          - php{{ php_version }}-fpm
+          - php{{ php_version }}-mysql
+          - php{{ php_version }}-curl
+          - php{{ php_version }}-gd
+          - php{{ php_version }}-mbstring
+          - php{{ php_version }}-xml
+          - php{{ php_version }}-zip
+          - unzip
+          - curl
+        state: present
+
+    - name: Ensure services are running
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - nginx
+        - mariadb
+        - php{{ php_version }}-fpm
+
+    - name: Set MariaDB root password
+      community.mysql.mysql_user:
+        name: root
+        password: "{{ db_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        check_implicit_admin: true
+      ignore_errors: true
+
+    - name: Create WordPress database
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_user: root
+        login_password: "{{ db_root_password }}"
+
+    - name: Create WordPress database user
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        host: "%"
+        state: present
+        login_user: root
+        login_password: "{{ db_root_password }}"
+
+    - name: Create web root
+      ansible.builtin.file:
+        path: "{{ wp_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Download and extract WordPress
+      ansible.builtin.shell: |
+        curl -s https://wordpress.org/latest.tar.gz | tar -xz -C /tmp
+      args:
+        creates: /tmp/wordpress
+
+    - name: Deploy WordPress files
+      ansible.builtin.copy:
+        src: /tmp/wordpress/
+        dest: "{{ wp_root }}"
+        owner: www-data
+        group: www-data
+        mode: "0755"
+        remote_src: true
+
+    - name: Create wp-config.php (inline)
+      ansible.builtin.copy:
+        dest: "{{ wp_root }}/wp-config.php"
+        owner: www-data
+        group: www-data
+        mode: "0640"
+        content: |
+          <?php
+          define('DB_NAME', '{{ db_name }}');
+          define('DB_USER', '{{ db_user }}');
+          define('DB_PASSWORD', '{{ db_password }}');
+          define('DB_HOST', 'localhost');
+
+          define('DB_CHARSET', 'utf8');
+          define('DB_COLLATE', '');
+
+          define('WP_DEBUG', false);
+
+          $table_prefix = 'wp_';
+
+          if ( ! defined('ABSPATH') ) {
+              define('ABSPATH', __DIR__ . '/');
+          }
+
+          require_once ABSPATH . 'wp-settings.php';
+          ?>
+
+    - name: Configure NGINX WordPress site (inline)
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/wordpress
+        content: |
+          server {
+              listen 80;
+              server_name {{ wp_domain }};
+
+              root {{ wp_root }};
+              index index.php index.html;
+
+              location / {
+                  try_files $uri $uri/ /index.php?$args;
+              }
+
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass unix:/run/php/php{{ php_version }}-fpm.sock;
+              }
+
+              location ~* \.(js|css|png|jpg|jpeg|gif|ico)$ {
+                  expires max;
+                  log_not_found off;
+              }
+          }
+      notify: Reload NGINX
+
+    - name: Enable NGINX site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/wordpress
+        dest: /etc/nginx/sites-enabled/wordpress
+        state: link
+        force: true
+
+    - name: Remove default NGINX site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+  handlers:
+    - name: Reload NGINX
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
