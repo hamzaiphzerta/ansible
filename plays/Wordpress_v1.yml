@@ -1,5 +1,5 @@
 ---
-- name: Provision WordPress on Ubuntu (Morpheus Safe)
+- name: Provision WordPress on Ubuntu (Morpheus Safe, Auto PHP)
   hosts: all
   become: true
 
@@ -12,14 +12,23 @@
     db_password: "StrongPassword123!"
     db_root_password: "RootDBPassword123!"
 
-    php_version: "8.1"
-
   pre_tasks:
     - name: Ensure Ubuntu
       assert:
         that:
           - ansible_distribution == "Ubuntu"
         fail_msg: "This playbook supports Ubuntu only."
+
+    - name: Set PHP version based on Ubuntu release
+      set_fact:
+        php_version: >-
+          {% if ansible_distribution_version is version('24.04', '>=') %}
+          8.3
+          {% elif ansible_distribution_version is version('22.04', '>=') %}
+          8.1
+          {% else %}
+          7.4
+          {% endif %}
 
     - name: Update apt cache
       apt:
