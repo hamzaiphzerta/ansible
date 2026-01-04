@@ -1,87 +1,80 @@
 ---
-- name: Provision WordPress on Ubuntu (Morpheus Safe, Auto PHP)
+- name: Provision WordPress on Ubuntu (Morpheus Safe, Single File)
   hosts: all
   become: true
+  gather_facts: true
 
   vars:
-    wp_domain: "example.com"
-    wp_root: "/var/www/wordpress"
+    wp_root: /var/www/wordpress
+    wp_db: wordpress
+    wp_db_user: wpuser
+    wp_db_password: wp_password_123
+    wp_db_root_password: root_password_123
 
-    db_name: "wordpress"
-    db_user: "wpuser"
-    db_password: "StrongPassword123!"
-    db_root_password: "RootDBPassword123!"
+  tasks:
 
-  pre_tasks:
     - name: Ensure Ubuntu
       assert:
         that:
           - ansible_distribution == "Ubuntu"
-        fail_msg: "This playbook supports Ubuntu only."
+        fail_msg: "This playbook only supports Ubuntu"
 
-    - name: Set PHP version based on Ubuntu release
+    - name: Set PHP version based on Ubuntu release (NO WHITESPACE)
       set_fact:
-        php_version: >-
-          {% if ansible_distribution_version is version('24.04', '>=') %}
-          8.3
-          {% elif ansible_distribution_version is version('22.04', '>=') %}
-          8.1
-          {% else %}
-          7.4
-          {% endif %}
+        php_version: "{{ '8.3' if ansible_distribution_version is version('24.04', '>=') else '8.1' if ansible_distribution_version is version('22.04', '>=') else '7.4' }}"
 
     - name: Update apt cache
       apt:
         update_cache: true
         cache_valid_time: 3600
 
-  tasks:
     - name: Install required packages
       apt:
         name:
           - nginx
           - mariadb-server
-          - php{{ php_version }}-fpm
-          - php{{ php_version }}-mysql
-          - php{{ php_version }}-curl
-          - php{{ php_version }}-gd
-          - php{{ php_version }}-mbstring
-          - php{{ php_version }}-xml
-          - php{{ php_version }}-zip
+          - "php{{ php_version }}-fpm"
+          - "php{{ php_version }}-mysql"
+          - "php{{ php_version }}-curl"
+          - "php{{ php_version }}-gd"
+          - "php{{ php_version }}-mbstring"
+          - "php{{ php_version }}-xml"
+          - "php{{ php_version }}-zip"
           - unzip
           - curl
         state: present
 
-    - name: Ensure services are running
+    - name: Ensure MariaDB is running
       service:
-        name: "{{ item }}"
+        name: mariadb
         state: started
         enabled: true
-      loop:
-        - nginx
-        - mariadb
-        - php{{ php_version }}-fpm
 
     - name: Set MariaDB root password
       shell: |
         mysql -u root <<EOF
-        ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_root_password }}';
+        ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ wp_db_root_password }}';
         FLUSH PRIVILEGES;
         EOF
       args:
-        executable: /bin/bash
-      ignore_errors: true
+        creates: /root/.mysql_root_configured
 
-    - name: Create WordPress database and user
+    - name: Mark MariaDB root password configured
+      file:
+        path: /root/.mysql_root_configured
+        state: touch
+
+    - name: Create WordPress database
       shell: |
-        mysql -u root -p'{{ db_root_password }}' <<EOF
-        CREATE DATABASE IF NOT EXISTS {{ db_name }};
-        CREATE USER IF NOT EXISTS '{{ db_user }}'@'%' IDENTIFIED BY '{{ db_password }}';
-        GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_user }}'@'%';
+        mysql -u root -p{{ wp_db_root_password }} -e "CREATE DATABASE IF NOT EXISTS {{ wp_db }};"
+
+    - name: Create WordPress DB user
+      shell: |
+        mysql -u root -p{{ wp_db_root_password }} -e "
+        CREATE USER IF NOT EXISTS '{{ wp_db_user }}'@'localhost' IDENTIFIED BY '{{ wp_db_password }}';
+        GRANT ALL PRIVILEGES ON {{ wp_db }}.* TO '{{ wp_db_user }}'@'localhost';
         FLUSH PRIVILEGES;
-        EOF
-      args:
-        executable: /bin/bash
+        "
 
     - name: Create web root
       file:
@@ -91,89 +84,87 @@
         group: www-data
         mode: "0755"
 
-    - name: Download and extract WordPress
-      shell: |
-        curl -s https://wordpress.org/latest.tar.gz | tar -xz -C /tmp
-      args:
-        creates: /tmp/wordpress
+    - name: Download WordPress
+      get_url:
+        url: https://wordpress.org/latest.tar.gz
+        dest: /tmp/wordpress.tar.gz
 
-    - name: Deploy WordPress files
-      copy:
-        src: /tmp/wordpress/
-        dest: "{{ wp_root }}"
+    - name: Extract WordPress
+      unarchive:
+        src: /tmp/wordpress.tar.gz
+        dest: /var/www/
+        remote_src: true
+        creates: "{{ wp_root }}/wp-config-sample.php"
+
+    - name: Set ownership
+      file:
+        path: "{{ wp_root }}"
         owner: www-data
         group: www-data
-        mode: "0755"
-        remote_src: true
+        recurse: true
 
     - name: Create wp-config.php
       copy:
         dest: "{{ wp_root }}/wp-config.php"
         owner: www-data
         group: www-data
-        mode: "0640"
+        mode: "0644"
         content: |
           <?php
-          define('DB_NAME', '{{ db_name }}');
-          define('DB_USER', '{{ db_user }}');
-          define('DB_PASSWORD', '{{ db_password }}');
+          define('DB_NAME', '{{ wp_db }}');
+          define('DB_USER', '{{ wp_db_user }}');
+          define('DB_PASSWORD', '{{ wp_db_password }}');
           define('DB_HOST', 'localhost');
-
           define('DB_CHARSET', 'utf8');
           define('DB_COLLATE', '');
-
           define('WP_DEBUG', false);
+          if ( !defined('ABSPATH') )
+            define('ABSPATH', dirname(__FILE__) . '/');
+          require_once(ABSPATH . 'wp-settings.php');
 
-          $table_prefix = 'wp_';
-
-          if ( ! defined('ABSPATH') ) {
-              define('ABSPATH', __DIR__ . '/');
-          }
-
-          require_once ABSPATH . 'wp-settings.php';
-          ?>
-
-    - name: Configure NGINX site
+    - name: Configure Nginx for WordPress
       copy:
         dest: /etc/nginx/sites-available/wordpress
         content: |
           server {
-              listen 80;
-              server_name {{ wp_domain }};
+            listen 80;
+            root {{ wp_root }};
+            index index.php index.html;
 
-              root {{ wp_root }};
-              index index.php index.html;
+            location / {
+              try_files $uri $uri/ /index.php?$args;
+            }
 
-              location / {
-                  try_files $uri $uri/ /index.php?$args;
-              }
+            location ~ \.php$ {
+              include snippets/fastcgi-php.conf;
+              fastcgi_pass unix:/run/php/php{{ php_version }}-fpm.sock;
+            }
 
-              location ~ \.php$ {
-                  include snippets/fastcgi-php.conf;
-                  fastcgi_pass unix:/run/php/php{{ php_version }}-fpm.sock;
-              }
-
-              location ~* \.(js|css|png|jpg|jpeg|gif|ico)$ {
-                  expires max;
-                  log_not_found off;
-              }
+            location ~ /\.ht {
+              deny all;
+            }
           }
-      notify: Reload NGINX
 
-    - name: Enable NGINX site
+    - name: Enable WordPress site
       file:
         src: /etc/nginx/sites-available/wordpress
         dest: /etc/nginx/sites-enabled/wordpress
         state: link
         force: true
 
-    - name: Remove default NGINX site
+    - name: Remove default nginx site
       file:
         path: /etc/nginx/sites-enabled/default
         state: absent
 
-  handlers:
-    - name: Reload NGINX
+    - name: Restart PHP-FPM
+      service:
+        name: "php{{ php_version }}-fpm"
+        state: restarted
+        enabled: true
+
+    - name: Restart Nginx
       service:
         name: nginx
-        state: reloaded
+        state: restarted
+        enabled: true
