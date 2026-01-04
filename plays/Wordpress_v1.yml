@@ -1,30 +1,42 @@
 ---
-- name: Provision WordPress on Ubuntu (Single File, Morpheus Safe)
+- name: Provision WordPress on Ubuntu (Morpheus Single File, Safe)
   hosts: all
   become: true
   gather_facts: true
 
   vars:
+    wp_install_dir: /var/www/wordpress
     wp_db_name: wordpress
     wp_db_user: wpuser
     wp_db_password: wp_password_123
-    wp_db_root_password: root_password_123
-    wp_install_dir: /var/www/html/wordpress
+    wp_db_host: localhost
 
   tasks:
 
-    - name: Ensure Ubuntu
+    - name: Ensure Ubuntu OS
       assert:
         that:
           - ansible_distribution == "Ubuntu"
+        fail_msg: "This playbook supports Ubuntu only"
 
-    - name: Set PHP version based on Ubuntu release
+    - name: Set PHP packages based on Ubuntu version
       set_fact:
-        php_version: "{{ '8.1' if ansible_distribution_version is version('22.04', '<') else '8.3' }}"
+        php_packages: >-
+          {{
+            [
+              'php-fpm',
+              'php-mysql',
+              'php-curl',
+              'php-gd',
+              'php-mbstring',
+              'php-xml',
+              'php-zip'
+            ]
+          }}
 
     - name: Update apt cache
       apt:
-        update_cache: yes
+        update_cache: true
         cache_valid_time: 3600
 
     - name: Install required packages
@@ -32,14 +44,9 @@
         name:
           - nginx
           - mariadb-server
-          - php{{ php_version }}-fpm
-          - php{{ php_version }}-mysql
-          - php{{ php_version }}-xml
-          - php{{ php_version }}-mbstring
-          - php{{ php_version }}-curl
-          - php{{ php_version }}-gd
-          - php{{ php_version }}-zip
           - unzip
+          - curl
+          - "{{ php_packages }}"
         state: present
 
     - name: Ensure MariaDB is running
@@ -48,70 +55,69 @@
         state: started
         enabled: true
 
-    - name: Set MariaDB root password (idempotent)
-      shell: |
-        mysql -u root <<EOF
-        ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ wp_db_root_password }}';
-        FLUSH PRIVILEGES;
-        EOF
-      args:
-        creates: /root/.mysql_root_configured
-
-    - name: Mark MariaDB root password as set
-      file:
-        path: /root/.mysql_root_configured
-        state: touch
-
     - name: Create WordPress database
       shell: |
-        mysql -u root -p{{ wp_db_root_password }} -e "CREATE DATABASE IF NOT EXISTS {{ wp_db_name }};"
-
-    - name: Create WordPress database user
-      shell: |
-        mysql -u root -p{{ wp_db_root_password }} -e "
+        mysql -e "CREATE DATABASE IF NOT EXISTS {{ wp_db_name }};
         CREATE USER IF NOT EXISTS '{{ wp_db_user }}'@'localhost' IDENTIFIED BY '{{ wp_db_password }}';
         GRANT ALL PRIVILEGES ON {{ wp_db_name }}.* TO '{{ wp_db_user }}'@'localhost';
-        FLUSH PRIVILEGES;
-        "
+        FLUSH PRIVILEGES;"
+      args:
+        creates: "/var/lib/mysql/{{ wp_db_name }}"
 
-    - name: Download WordPress
-      get_url:
-        url: https://wordpress.org/latest.zip
-        dest: /tmp/wordpress.zip
-        mode: '0644'
-
-    - name: Extract WordPress
-      unarchive:
-        src: /tmp/wordpress.zip
-        dest: /var/www/html
-        remote_src: yes
-        creates: "{{ wp_install_dir }}"
-
-    - name: Set permissions
+    - name: Create WordPress install directory
       file:
         path: "{{ wp_install_dir }}"
+        state: directory
         owner: www-data
         group: www-data
-        recurse: yes
+        mode: "0755"
+
+    - name: Download and extract WordPress (curl, Morpheus-safe)
+      shell: |
+        rm -rf /tmp/wordpress
+        curl -fsSL https://wordpress.org/latest.tar.gz | tar -xz -C /tmp
+      args:
+        creates: /tmp/wordpress
+
+    - name: Deploy WordPress files
+      copy:
+        src: /tmp/wordpress/
+        dest: "{{ wp_install_dir }}"
+        owner: www-data
+        group: www-data
+        mode: "0755"
+        remote_src: true
 
     - name: Create wp-config.php
       copy:
         dest: "{{ wp_install_dir }}/wp-config.php"
         owner: www-data
         group: www-data
-        mode: '0644'
+        mode: "0644"
         content: |
           <?php
           define('DB_NAME', '{{ wp_db_name }}');
           define('DB_USER', '{{ wp_db_user }}');
           define('DB_PASSWORD', '{{ wp_db_password }}');
-          define('DB_HOST', 'localhost');
+          define('DB_HOST', '{{ wp_db_host }}');
           define('DB_CHARSET', 'utf8');
           define('DB_COLLATE', '');
+
+          define('AUTH_KEY',         'change-me');
+          define('SECURE_AUTH_KEY',  'change-me');
+          define('LOGGED_IN_KEY',    'change-me');
+          define('NONCE_KEY',        'change-me');
+          define('AUTH_SALT',        'change-me');
+          define('SECURE_AUTH_SALT', 'change-me');
+          define('LOGGED_IN_SALT',   'change-me');
+          define('NONCE_SALT',       'change-me');
+
           $table_prefix = 'wp_';
           define('WP_DEBUG', false);
+
           if ( !defined('ABSPATH') )
               define('ABSPATH', dirname(__FILE__) . '/');
+
           require_once(ABSPATH . 'wp-settings.php');
 
     - name: Configure Nginx for WordPress
@@ -122,6 +128,7 @@
               listen 80;
               root {{ wp_install_dir }};
               index index.php index.html;
+              server_name _;
 
               location / {
                   try_files $uri $uri/ /index.php?$args;
@@ -129,7 +136,7 @@
 
               location ~ \.php$ {
                   include snippets/fastcgi-php.conf;
-                  fastcgi_pass unix:/run/php/php{{ php_version }}-fpm.sock;
+                  fastcgi_pass unix:/run/php/php-fpm.sock;
               }
 
               location ~ /\.ht {
@@ -142,17 +149,17 @@
         src: /etc/nginx/sites-available/wordpress
         dest: /etc/nginx/sites-enabled/wordpress
         state: link
-        force: yes
+        force: true
 
-    - name: Remove default nginx site
+    - name: Remove default Nginx site
       file:
         path: /etc/nginx/sites-enabled/default
         state: absent
 
-    - name: Restart services
+    - name: Restart Nginx and PHP-FPM
       service:
         name: "{{ item }}"
         state: restarted
       loop:
         - nginx
-        - php{{ php_version }}-fpm
+        - php-fpm
