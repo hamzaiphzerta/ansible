@@ -1,5 +1,5 @@
 ---
-- name: Provision WordPress on Ubuntu (Single File - FIXED list install)
+- name: Provision WordPress on Ubuntu (Single File - FIXED apt + MariaDB root auth)
   hosts: all
   become: true
   gather_facts: true
@@ -8,12 +8,15 @@
     wp_db_name: wordpress
     wp_db_user: wpuser
     wp_db_password: wp_pass_123
+    # Optional fallback only (used only if socket login fails)
     wp_db_root_password: root_pass_123
+
     wp_install_dir: /var/www/wordpress
 
     base_packages:
       - nginx
       - mariadb-server
+      - mariadb-client
       - unzip
       - curl
 
@@ -27,7 +30,6 @@
       - php-zip
 
   tasks:
-
     - name: Ensure Ubuntu OS
       assert:
         that:
@@ -39,12 +41,12 @@
         update_cache: true
         cache_valid_time: 3600
 
-    - name: Install base packages (NO nested lists)
+    - name: Install base packages (flat list)
       apt:
         name: "{{ base_packages }}"
         state: present
 
-    - name: Install PHP packages (NO nested lists)
+    - name: Install PHP packages (flat list)
       apt:
         name: "{{ php_packages }}"
         state: present
@@ -55,21 +57,22 @@
         state: started
         enabled: true
 
-    - name: Secure MariaDB root user (idempotent marker)
-      shell: |
-        mysql -u root <<EOF
-        ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ wp_db_root_password }}';
-        DELETE FROM mysql.user WHERE User='';
-        DROP DATABASE IF EXISTS test;
-        FLUSH PRIVILEGES;
-        EOF
-        touch /root/.mariadb-secured
-      args:
-        creates: /root/.mariadb-secured
+    - name: Check MariaDB root socket login (no password)
+      command: mysql -u root -e "SELECT 1;"
+      register: mysql_root_socket
+      ignore_errors: true
+      changed_when: false
 
-    - name: Create WordPress database and user
+    - name: Set mysql command to use (socket preferred, password fallback)
+      set_fact:
+        mysql_cmd: >-
+          {{ 'mysql -u root'
+             if (mysql_root_socket.rc | default(1)) == 0
+             else 'mysql -u root -p' ~ wp_db_root_password }}
+
+    - name: Create WordPress DB and user (works with socket or password)
       shell: |
-        mysql -u root -p{{ wp_db_root_password }} <<EOF
+        {{ mysql_cmd }} <<'EOF'
         CREATE DATABASE IF NOT EXISTS {{ wp_db_name }};
         CREATE USER IF NOT EXISTS '{{ wp_db_user }}'@'localhost' IDENTIFIED BY '{{ wp_db_password }}';
         GRANT ALL PRIVILEGES ON {{ wp_db_name }}.* TO '{{ wp_db_user }}'@'localhost';
