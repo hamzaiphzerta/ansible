@@ -7,7 +7,7 @@
     zabbix_db_password: "zabbix123"
     postgres_password: "{{ hostvars[inventory_hostname].get('morpheus', {}).get('customOptions', {}).get('dbCustomPassword', 'postgres123') }}"
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
-    ansible_python_interpreter: /usr/bin/python3   # <-- fixes interpreter warning
+    ansible_python_interpreter: /usr/bin/python3   # fixes ???
 
   pre_tasks:
     - name: Fix urllib3 / chardet versions to suppress RequestsDependencyWarning
