@@ -5,10 +5,8 @@
   gather_facts: true
 
   vars:
-    # Pin interpreter to remove Ansible "discovered interpreter" warning
     ansible_python_interpreter: /usr/bin/python3
 
-    # Morpheus inputs
     mysql_root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('rootroot') }}"
     db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
     db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
@@ -17,11 +15,10 @@
     rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
     rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
 
-    # Safer tmp for some locked-down images
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
 
-  pre_tasks:
-    - name: Ensure Ansible remote tmp directory exists and is writable
+  tasks:
+    - name: Ensure Ansible remote tmp directory exists
       file:
         path: "{{ ansible_remote_tmp }}"
         state: directory
@@ -29,32 +26,26 @@
         owner: root
         group: root
 
-    - name: Detect if custom DB vars are provided
+    - name: Determine if custom DB vars are provided
       set_fact:
         db_vars_provided: "{{ (db_password | length > 0) and (db_user | length > 0) and (db_name | length > 0) }}"
 
-    # DNS (note: overwriting resolv.conf may be temporary depending on OS)
-    - name: Configure resolv.conf with Google DNS (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    # (Optional) DNS override
+    - name: Configure resolv.conf with Google DNS
       shell: "echo nameserver 8.8.8.8 > /etc/resolv.conf"
       args:
         warn: false
+      changed_when: true
 
-    - name: Configure resolv.conf with Google DNS (RHEL)
-      when: ansible_os_family == "RedHat"
-      shell: "echo nameserver 8.8.8.8 > /etc/resolv.conf"
-      args:
-        warn: false
-
-    # Clear proxy settings (fixes your invalid /etc/yum.conf.d path)
-    - name: Clear apt proxy settings (Ubuntu)
+    # Clear proxies safely
+    - name: Clear apt proxy settings (Ubuntu) - best effort
       when: ansible_distribution == "Ubuntu"
       shell: "truncate -s 0 /etc/apt/apt.conf.d/90curtin-aptproxy"
       args:
         warn: false
       failed_when: false
 
-    - name: Remove proxy lines from /etc/yum.conf (RHEL)
+    - name: Remove proxy lines from /etc/yum.conf (RHEL) - best effort
       when: ansible_os_family == "RedHat"
       lineinfile:
         path: /etc/yum.conf
@@ -62,37 +53,35 @@
         state: absent
       failed_when: false
 
-  tasks:
     # -----------------------------
     # Ubuntu install
     # -----------------------------
-    - name: Install required packages (Ubuntu)
+    - name: Install prerequisites (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       apt:
         name:
-          - software-properties-common
-          - python3-pymysql
           - curl
           - gnupg2
           - apt-transport-https
+          - python3-pymysql
         state: present
         update_cache: yes
 
-    - name: Create keyrings directory (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      file:
-        path: /etc/apt/keyrings
-        state: directory
-        mode: "0755"
-
-    - name: Download MariaDB GPG key (Ubuntu)
+    - name: Add MariaDB repo key (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       get_url:
         url: https://mariadb.org/mariadb_release_signing_key.pgp
         dest: /etc/apt/keyrings/mariadb-keyring.pgp
         mode: "0644"
 
-    - name: Add MariaDB Repository (Ubuntu)
+    - name: Ensure keyrings directory exists (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add MariaDB repository (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       copy:
         content: |
@@ -148,34 +137,24 @@
       args:
         creates: /etc/yum.repos.d/mariadb.repo
 
-    - name: Install MariaDB dependencies (RHEL)
-      when: ansible_os_family == "RedHat"
-      yum:
-        name:
-          - perl-DBI
-          - libaio
-          - libsepol
-          - lsof
-          - boost-program-options
-          - python3-PyMySQL
-        state: present
-
     - name: Install MariaDB server (RHEL)
       when: ansible_os_family == "RedHat"
       yum:
-        name: mariadb-server
+        name:
+          - mariadb-server
+          - python3-PyMySQL
         state: present
 
     # -----------------------------
     # Common config
     # -----------------------------
-    - name: Enable and start MariaDB service
+    - name: Enable and start MariaDB
       systemd:
         name: mariadb
         enabled: yes
         state: started
 
-    - name: Wait until MariaDB responds (mysqladmin ping)
+    - name: Wait for MariaDB to respond
       command: mysqladmin ping
       register: mariadb_ping
       retries: 15
@@ -183,66 +162,41 @@
       until: mariadb_ping.rc == 0
       changed_when: false
 
-    # Make sure mysql Python modules are usable on both OS families
-    - name: Ensure community.mysql collection is available (informational)
-      debug:
-        msg: "If mysql_* modules fail, install community.mysql on the Ansible runner."
-      changed_when: false
-
-    # Set root password using module (idempotent-ish)
-    - name: Set root password (best effort)
-      community.mysql.mysql_user:
-        name: root
-        host: localhost
-        password: "{{ mysql_root_password }}"
-        login_user: root
-        login_password: ""
-        check_implicit_admin: true
-        priv: "*.*:ALL,GRANT"
-        state: present
-      register: root_pw_result
+    # Set root password only if it's not already set
+    - name: Try setting root password (no password case) - best effort
+      shell: |
+        mysql --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+      register: set_root_pw
       failed_when: false
+      changed_when: set_root_pw.rc == 0
 
     - name: Remove anonymous users
-      community.mysql.mysql_user:
-        name: ""
-        host_all: true
-        login_user: root
-        login_password: "{{ mysql_root_password }}"
-        state: absent
+      shell: |
+        mysql --user=root --password="{{ mysql_root_password }}" --execute="DELETE FROM mysql.user WHERE User=''; FLUSH PRIVILEGES;"
+      changed_when: true
 
     - name: Remove test database
-      community.mysql.mysql_db:
-        name: test
-        login_user: root
-        login_password: "{{ mysql_root_password }}"
-        state: absent
+      shell: |
+        mysql --user=root --password="{{ mysql_root_password }}" --execute="DROP DATABASE IF EXISTS test; DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%'; FLUSH PRIVILEGES;"
+      changed_when: true
 
-    - name: Create database if variables are provided
+    - name: Create database (optional)
       when: db_vars_provided
-      community.mysql.mysql_db:
-        name: "{{ db_name }}"
-        login_user: root
-        login_password: "{{ mysql_root_password }}"
-        state: present
+      shell: |
+        mysql --user=root --password="{{ mysql_root_password }}" --execute="CREATE DATABASE IF NOT EXISTS {{ db_name }};"
+      changed_when: true
 
-    - name: Create user and grant privileges if variables are provided
+    - name: Create user + grant privileges (optional)
       when: db_vars_provided
-      community.mysql.mysql_user:
-        name: "{{ db_user }}"
-        host: "%"
-        password: "{{ db_password }}"
-        priv: "{{ db_name }}.*:ALL"
-        login_user: root
-        login_password: "{{ mysql_root_password }}"
-        state: present
+      shell: |
+        mysql --user=root --password="{{ mysql_root_password }}" --execute="CREATE USER IF NOT EXISTS '{{ db_user }}'@'%' IDENTIFIED BY '{{ db_password }}'; GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_user }}'@'%'; FLUSH PRIVILEGES;"
+      changed_when: true
 
-    # Final validation (this should be what Morpheus uses as "real success")
-    - name: Validation - show MariaDB version
+    - name: Validation - MariaDB version (must succeed)
       command: mysql --user=root --password={{ mysql_root_password }} -e "SELECT VERSION();"
       register: mariadb_version
       changed_when: false
 
-    - name: Print status of MariaDB setup
+    - name: Print status
       debug:
-        msg: "MariaDB OK. Version={{ mariadb_version.stdout_lines | default([]) }} DB vars provided={{ db_vars_provided }} User={{ db_user }} DB={{ db_name }}"
+        msg: "MariaDB OK. {{ mariadb_version.stdout_lines | default([]) }} DB vars provided={{ db_vars_provided }} user={{ db_user }} db={{ db_name }}"
