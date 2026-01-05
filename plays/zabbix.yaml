@@ -1,5 +1,5 @@
 ---
-- name: Install Zabbix on Ubuntu and RHEL
+- name: Install Zabbix on Ubuntu 22.04
   hosts: all
   become: true
 
@@ -13,53 +13,51 @@
 
   tasks:
 
-    # --- Ubuntu specific ---
-    - name: Configure resolv.conf with Google DNS (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    # --- Basic system setup ---
+    - name: Configure resolv.conf with Google DNS
       shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
 
-    - name: Clear apt proxy settings (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Clear apt proxy settings
       shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
 
-    - name: Download Zabbix release package (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    # --- Install Zabbix repo ---
+    - name: Download Zabbix release package
       get_url:
         url: https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest+ubuntu22.04_all.deb
         dest: /tmp/zabbix-release.deb
 
-    - name: Install Zabbix release package (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Install Zabbix release package
       apt:
         deb: /tmp/zabbix-release.deb
         state: present
 
-    - name: Update apt cache (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Update apt cache after Zabbix repo
       apt:
         update_cache: yes
 
-    - name: Install required packages (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    # --- Install Zabbix packages ---
+    - name: Install required packages
       apt:
         name:
           - zabbix-server-pgsql
           - zabbix-frontend-php
-          - php-pgsql   # safer, works on Ubuntu 22.04
+          - php-pgsql
           - zabbix-apache-conf
           - zabbix-sql-scripts
           - zabbix-agent
         state: present
-      register: zabbix_install_ubuntu
 
-    # --- PostgreSQL config (Ubuntu) ---
+    # --- PostgreSQL setup ---
     - name: Get PostgreSQL version
-      when: ansible_distribution == "Ubuntu"
       shell: ls -1 /etc/postgresql/ | sort -V | tail -n 1
       register: pg_version
       changed_when: false
 
-    - name: Configure PostgreSQL authentication (Ubuntu)
+    - name: Configure PostgreSQL authentication
       lineinfile:
         path: "/etc/postgresql/{{ pg_version.stdout }}/main/pg_hba.conf"
         regexp: "^(host|local).*all.*all.*"
@@ -68,8 +66,7 @@
       loop:
         - "local   all             all                                     md5"
         - "host    all             all             127.0.0.1/32            md5"
-      ignore_errors: yes  # prevents failure if regex doesn't match
-      when: ansible_distribution == "Ubuntu"
+      ignore_errors: yes
 
     - name: Restart PostgreSQL
       systemd:
@@ -78,14 +75,14 @@
 
     - name: Create Zabbix database user
       become_user: postgres
-      postgresql_user:
+      community.postgresql.postgresql_user:
         name: zabbix
         password: "{{ zabbix_db_password }}"
         state: present
 
     - name: Create Zabbix database
       become_user: postgres
-      postgresql_db:
+      community.postgresql.postgresql_db:
         name: zabbix
         owner: zabbix
         state: present
@@ -100,6 +97,7 @@
       failed_when: schema_import.rc != 0
       changed_when: schema_import.rc == 0
 
+    # --- Configure Zabbix ---
     - name: Configure Zabbix server DB connection
       lineinfile:
         path: /etc/zabbix/zabbix_server.conf
@@ -111,12 +109,11 @@
         - { regexp: '^DBUser=', line: 'DBUser=zabbix' }
         - { regexp: '^DBPassword=', line: 'DBPassword={{ zabbix_db_password }}' }
 
-    - name: Set PHP timezone (Ubuntu)
+    - name: Set PHP timezone
       lineinfile:
         path: /etc/php/8.1/apache2/php.ini
         regexp: "^;?date.timezone ="
         line: "date.timezone = UTC"
-      when: ansible_distribution == "Ubuntu"
 
     - name: Configure Apache for Zabbix
       copy:
@@ -138,7 +135,7 @@
               </IfModule>
           </Directory>
 
-    - name: Start Zabbix services (Ubuntu)
+    - name: Start Zabbix services
       systemd:
         name: "{{ item }}"
         state: restarted
