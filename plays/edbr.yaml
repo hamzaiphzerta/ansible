@@ -1,0 +1,90 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    edb_version: 17
+    dns_server: 8.8.8.8
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+
+    # Download and execute repository setup script
+    - name: Download EDB repository setup script (Ubuntu)
+      get_url:
+        url: "https://downloads.enterprisedb.com/ODhIpQiBGQejsnFtPvwMH6cslBPSS2V9/enterprise/setup.deb.sh"
+        dest: /tmp/edb_setup.sh
+        mode: 0755
+        timeout: 60
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Download EDB repository setup script (RedHat)
+      get_url:
+        url: "https://downloads.enterprisedb.com/ODhIpQiBGQejsnFtPvwMH6cslBPSS2V9/enterprise/setup.rpm.sh"
+        dest: /tmp/edb_setup.sh
+        mode: 0755
+        timeout: 60
+      when: ansible_os_family == "RedHat"
+
+    - name: Execute EDB repository setup script
+      command: /tmp/edb_setup.sh
+      args:
+        creates: 
+          - "/etc/apt/sources.list.d/edb.list"  # Ubuntu
+          - "/etc/yum.repos.d/edb.repo"  # RedHat
+      register: edb_repo_setup
+
+    # Install EDB Advanced Server
+    - name: Install EDB Advanced Server (Ubuntu)
+      apt:
+        name: "edb-as{{ edb_version }}-server"
+        state: present
+        update_cache: yes
+      register: edb_install_ubuntu
+      retries: 3
+      delay: 5
+      until: edb_install_ubuntu is success
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Install EDB Advanced Server (RedHat)
+      dnf:
+        name: "edb-as{{ edb_version }}-server"
+        state: present
+        update_cache: yes
+      register: edb_install_redhat
+      retries: 3
+      delay: 5
+      until: edb_install_redhat is success
+      when: ansible_os_family == "RedHat"
+
+    - name: Remove temporary setup script
+      file:
+        path: /tmp/edb_setup.sh
+        state: absent
+
+  post_tasks:
+    - name: Verify EDB installation
+      command: psql -V
+      register: psql_version
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display EDB version
+      debug:
+        var: psql_version.stdout_lines
+      when: psql_version.rc == 0

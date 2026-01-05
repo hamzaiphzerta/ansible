@@ -1,0 +1,61 @@
+---
+- name: Configure HTTP/HTTPS proxy and install Kubernetes
+  hosts: all
+  become: yes
+  vars:
+    bundle_path: "/tmp/473f02a.tar.gz"
+    destination_dir: "/opt/kube"
+    output_file: "/opt/kube/join_command.txt"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+
+    - name: Refresh apt cache
+      apt:
+        update_cache: yes
+
+    - name: Create destination directory
+      file:
+        path: "{{ destination_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy Kubernetes bundle to target machine
+      copy:
+        src: "{{ bundle_path }}"
+        dest: "{{ destination_dir }}/473f02a.tar.gz"
+        mode: '0644'
+
+    - name: Extract Kubernetes bundle
+      unarchive:
+        src: "{{ destination_dir }}/473f02a.tar.gz"
+        dest: "/home/powerm"
+        remote_src: yes
+      become: yes
+
+    - name: Run Kubernetes install script and capture output
+      shell: |
+        cat /home/powerm/install.sh | sudo bash -s airgap
+      register: install_output
+      
+
+    - name: Extract last line containing join command and save to file
+      shell: |
+        echo "{{ install_output.stdout_lines[-1] }}" > {{ output_file }}
+      when: install_output.stdout_lines is defined and install_output.stdout_lines | length > 0

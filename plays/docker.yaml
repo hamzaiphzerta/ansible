@@ -1,0 +1,196 @@
+---
+- name: Install Docker on Ubuntu and RHEL
+  hosts: all
+  become: true
+  vars:
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+      
+    # Ubuntu-specific tasks
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+
+    - name: Install required packages (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name:
+          - ca-certificates
+          - curl
+        state: present
+
+    - name: Create keyrings directory (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Docker GPG key (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      args:
+        creates: /etc/apt/keyrings/docker.asc
+
+    - name: Ensure Docker GPG key has read permissions (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      file:
+        path: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+
+    - name: Set up the Docker repository (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+        $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+    - name: Update apt cache again (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+
+    - name: Install Docker packages (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+      register: docker_install_ubuntu
+
+    # RHEL-specific tasks
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == "RedHat"
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == "RedHat"
+      command: subscription-manager repos --enable rhel-8-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+
+    - name: Install dnf plugins core (RHEL)
+      when: ansible_os_family == "RedHat"
+      dnf:
+        name: dnf-plugins-core
+        state: present
+
+    - name: Add Docker CE repository (RHEL)
+      when: ansible_os_family == "RedHat"
+      command: dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+      args:
+        creates: /etc/yum.repos.d/docker-ce.repo
+
+    - name: Install Docker packages (RHEL)
+      when: ansible_os_family == "RedHat"
+      dnf:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+      register: docker_install_rhel
+
+    # Common tasks for both distributions
+    - name: Create Docker daemon directory
+      file:
+        path: /etc/docker
+        state: directory
+        mode: '0755'
+
+    - name: Configure DNS in resolved.conf
+      when: ansible_distribution == "Ubuntu"
+      copy:
+        content: |
+          [Resolve]
+          DNS=8.8.8.8 8.8.4.4
+          DNSStubListener=yes
+        dest: /etc/systemd/resolved.conf
+        mode: '0644'
+
+    - name: Restart systemd-resolved
+      when: ansible_distribution == "Ubuntu"
+      systemd:
+        name: systemd-resolved
+        state: restarted
+        
+    - name: Configure Docker daemon with DNS and registry mirrors
+      copy:
+        content: |
+          {
+            "dns": ["8.8.8.8", "8.8.4.4"],
+            "registry-mirrors": ["https://mirror.gcr.io"]
+          }
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+    
+    - name: Create Docker systemd directory
+      file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Configure Docker service
+      copy:
+        content: |
+          [Service]
+          Environment="NO_PROXY=localhost,127.0.0.1,.local,registry-1.docker.io"
+        dest: /etc/systemd/system/docker.service.d/http-proxy.conf
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Restart Docker service
+      systemd:
+        name: docker
+        state: restarted
+      when: docker_install_ubuntu is success or docker_install_rhel is success
+
+    - name: Wait for Docker service to fully start
+      wait_for:
+        timeout: 30
+
+    - name: Verify Docker installation
+      command: docker run hello-world
+      register: hello_world_output
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: hello_world_output is not failed
+      when: docker_install_ubuntu is success or docker_install_rhel is success
+
+    - name: Display Docker verification result
+      debug:
+        var: hello_world_output.stdout_lines
+      when: docker_install_ubuntu is success or docker_install_rhel is success

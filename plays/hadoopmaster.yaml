@@ -1,0 +1,160 @@
+---
+- hosts: all
+  vars:
+    slave_ip: "morpehus[instance][containers].findAll{it.containerTypeShortName == 'slave'}.collect{it.externalIp}"
+    proxy_url: "http://10.1.38.2:3128"
+  become: yes
+  tasks:
+    - name: Configure HTTP proxy for apt
+      copy:
+        content: |
+          Acquire::http::Proxy "{{ proxy_url }}";
+          Acquire::https::Proxy "{{ proxy_url }}";
+        dest: /etc/apt/apt.conf.d/95proxies
+
+    - name: Configure HTTP proxy for the environment
+      lineinfile:
+        path: /etc/environment
+        line: '{{ item }}'
+        create: yes
+      with_items:
+        - 'http_proxy={{ proxy_url }}'
+        - 'https_proxy={{ proxy_url }}'
+        - 'HTTP_PROXY={{ proxy_url }}'
+        - 'HTTPS_PROXY={{ proxy_url }}'
+  
+    # Step 1: Install Java
+    - name: Install OpenJDK 8
+      apt:
+        name: openjdk-8-jdk
+        state: present
+        update_cache: yes
+    
+    # Step 2: Create Hadoop user
+    - name: Add Hadoop user
+      user:
+        name: hadoop
+        state: present
+        groups: sudo
+        shell: /bin/bash
+        password: ACSCloud!2021!
+    
+    # Step 3: Install and configure SSH
+    - name: Install SSH
+      apt:
+        name: openssh-server
+        state: present
+        update_cache: yes
+
+    - name: configure passwordless ssh 1
+      command: ssh-keygen -t rsa -b 4096 -f "$HOME/.ssh/id_rsa" -q -N "" 
+
+    - name: configure passwordless ssh 2
+      command: sshpass -p "ACSCloud!2021!" ssh-copy-id hadoop@'{{ slave_ip }}'
+    
+    # Step 4: Download and install Hadoop
+    - name: Download Hadoop
+      get_url:
+        url: https://downloads.apache.org/hadoop/common/hadoop-3.3.6/hadoop-3.3.6.tar.gz
+        dest: /tmp/hadoop-3.3.6.tar.gz
+    
+    - name: Extract Hadoop
+      unarchive:
+        src: /tmp/hadoop-3.3.6.tar.gz
+        dest: /usr/local
+        remote_src: yes
+    
+    - name: Create Hadoop symlink
+      file:
+        src: /usr/local/hadoop-3.3.6
+        dest: /usr/local/hadoop
+        state: link
+    
+    # Step 5: Set environment variables
+    - name: Configure Hadoop environment variables
+      lineinfile:
+        path: /home/hadoop/.bashrc
+        line: "{{ item }}"
+        state: present
+      with_items:
+        - 'export HADOOP_HOME=/usr/local/hadoop'
+        - 'export PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin'
+        - 'export HADOOP_CONF_DIR=$HADOOP_HOME/etc/hadoop'
+        - 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:bin/java::")'
+    
+    - name: Source the environment variables
+      command: source /home/hadoop/.bashrc
+    
+    # Step 6: Configure Hadoop (core-site.xml, hdfs-site.xml, mapred-site.xml, yarn-site.xml)
+    - name: Configure core-site.xml
+      copy:
+        dest: /usr/local/hadoop/etc/hadoop/core-site.xml
+        content: |
+          <configuration>
+            <property>
+              <name>fs.defaultFS</name>
+              <value>hdfs://"{{ morpheus['server']['internalIp'] }}":9000</value>
+            </property>
+          </configuration>
+
+    - name: Configure hdfs-site.xml
+      copy:
+        dest: /usr/local/hadoop/etc/hadoop/hdfs-site.xml
+        content: |
+          <configuration>
+            <property>
+              <name>dfs.replication</name>
+              <value>2</value>
+            </property>
+            <property>
+              <name>dfs.namenode.name.dir</name>
+              <value>file:///usr/local/hadoop/hadoop_data/hdfs/namenode</value>
+            </property>
+            <property>
+              <name>dfs.datanode.data.dir</name>
+              <value>file:///usr/local/hadoop/hadoop_data/hdfs/datanode</value>
+            </property>
+          </configuration>
+
+    - name: Configure mapred-site.xml
+      copy:
+        dest: /usr/local/hadoop/etc/hadoop/mapred-site.xml
+        content: |
+          <configuration>
+            <property>
+              <name>mapreduce.framework.name</name>
+              <value>yarn</value>
+            </property>
+          </configuration>
+
+    - name: Configure yarn-site.xml
+      copy:
+        dest: /usr/local/hadoop/etc/hadoop/yarn-site.xml
+        content: |
+          <configuration>
+            <property>
+              <name>yarn.resourcemanager.hostname</name>
+              <value>"{{ morpheus['server']['internalIp'] }}"</value>
+            </property>
+            <property>
+              <name>yarn.nodemanager.aux-services</name>
+              <value>mapreduce_shuffle</value>
+            </property>
+          </configuration>
+          
+    - name: Configure slave
+      copy:
+        dest: /usr/local/hadoop/etc/hadoop/workers
+        content: |
+          {{ slave_ip }}
+
+    # Step 7: Format the NameNode
+    - name: Format NameNode
+      command: hdfs namenode -format
+    
+    # Step 8: Start Hadoop services
+    - name: Start HDFS
+      command: start-dfs.sh
+    
+    - name: Start YARN
+      command: start-yarn.sh

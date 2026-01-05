@@ -1,0 +1,238 @@
+---
+- name: Install and configure PostgreSQL
+  hosts: all
+  become: true
+  vars:
+    postgres_password: "{{ hostvars[inventory_hostname].get('morpheus', {}).get('customOptions', {}).get('dbCustomPassword', 'postgres123') }}"
+    db_user: "{{ hostvars[inventory_hostname].get('morpheus', {}).get('customOptions', {}).get('dbCustomUser', 'postgres') }}"
+    db_name: "{{ hostvars[inventory_hostname].get('morpheus', {}).get('customOptions', {}).get('dbCustomName', 'postgres') }}"
+    sudo_password: "{{ lookup('cypher','secret=secret/pw') }}"
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+    
+    - name: Ensure Ansible remote tmp directory exists and is writable
+      file:
+        path: "{{ ansible_remote_tmp }}"
+        state: directory
+        mode: '1777'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      become: true
+
+    - name: Get RHEL major version
+      when: ansible_os_family == 'RedHat'
+      set_fact:
+        rhel_major_version: "{{ ansible_distribution_major_version }}"
+
+    # RHEL-specific tasks
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager repos --enable rhel-{{ rhel_major_version }}-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+
+    # Ubuntu-specific tasks
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install PostgreSQL (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name: 
+          - postgresql
+          - postgresql-contrib
+        state: present
+
+    # PostgreSQL installation and configuration for RHEL
+    - name: Install PostgreSQL server (RHEL)
+      yum:
+        name: "@postgresql"
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Initialize PostgreSQL database (RHEL only)
+      command: "/usr/bin/postgresql-setup --initdb"
+      args:
+        creates: "/var/lib/pgsql/data/postgresql.conf"
+        chdir: /tmp
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure PostgreSQL is started and enabled (RHEL)
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure PostgreSQL is started and enabled (Ubuntu)
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Set PostgreSQL password for postgres user (RHEL)
+      shell: |
+        PGPASSWORD="{{ sudo_password }}" sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '{{ postgres_password }}';"
+      args:
+        chdir: /tmp
+      register: set_postgres_password
+      when: (postgres_password != 'postgres123' and postgres_password != '') and ansible_os_family == 'RedHat'
+
+    - name: Set PostgreSQL password for postgres user (Ubuntu)
+      shell: |
+        sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '{{ postgres_password }}';"
+      args:
+        chdir: /tmp
+      register: set_postgres_password_ubuntu
+      when: (postgres_password != 'postgres123' and postgres_password != '') and ansible_distribution == "Ubuntu"
+
+    - name: Check if custom user should be created
+      set_fact:
+        create_custom_user: "{{ db_user != 'postgres' and db_user != '' }}"
+
+    - name: Check if custom database should be created
+      set_fact:
+        create_custom_db: "{{ db_name != 'postgres' and db_name != '' }}"
+
+    - name: Create database user (RHEL)
+      shell: |
+        PGPASSWORD="{{ sudo_password }}" sudo -u postgres psql -c "CREATE USER {{ db_user }} WITH PASSWORD '{{ postgres_password }}';"
+      args:
+        chdir: /tmp
+      register: create_user_result
+      ignore_errors: yes
+      when: create_custom_user | bool and ansible_os_family == 'RedHat'
+
+    - name: Create database user (Ubuntu)
+      shell: |
+        sudo -u postgres psql -c "CREATE USER {{ db_user }} WITH PASSWORD '{{ postgres_password }}';"
+      args:
+        chdir: /tmp
+      register: create_user_result_ubuntu
+      ignore_errors: yes
+      when: create_custom_user | bool and ansible_distribution == "Ubuntu"
+
+    - name: Create database (RHEL)
+      shell: |
+        PGPASSWORD="{{ sudo_password }}" sudo -u postgres psql -c "CREATE DATABASE {{ db_name }} OWNER {{ db_user }};"
+      args:
+        chdir: /tmp
+      register: create_db_result
+      ignore_errors: yes
+      when: create_custom_user | bool and create_custom_db | bool and ansible_os_family == 'RedHat'
+
+    - name: Create database (Ubuntu)
+      shell: |
+        sudo -u postgres psql -c "CREATE DATABASE {{ db_name }} OWNER {{ db_user }};"
+      args:
+        chdir: /tmp
+      register: create_db_result_ubuntu
+      ignore_errors: yes
+      when: create_custom_user | bool and create_custom_db | bool and ansible_distribution == "Ubuntu"
+
+    - name: Grant privileges (RHEL)
+      shell: |
+        PGPASSWORD="{{ sudo_password }}" sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ db_name }} TO {{ db_user }};"
+      args:
+        chdir: /tmp
+      register: grant_privileges
+      when: create_custom_user | bool and create_custom_db | bool and ansible_os_family == 'RedHat'
+
+    - name: Grant privileges (Ubuntu)
+      shell: |
+        sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ db_name }} TO {{ db_user }};"
+      args:
+        chdir: /tmp
+      register: grant_privileges_ubuntu
+      when: create_custom_user | bool and create_custom_db | bool and ansible_distribution == "Ubuntu"
+
+    - name: Allow external connections in pg_hba.conf (Ubuntu)
+      lineinfile:
+        path: /etc/postgresql/14/main/pg_hba.conf
+        line: "host    all             all             0.0.0.0/0               md5"
+        backup: yes
+      when: ansible_distribution == "Ubuntu"
+    
+    - name: Allow external connections in pg_hba.conf (RHEL)
+      lineinfile:
+        path: /var/lib/pgsql/data/pg_hba.conf
+        line: "host    all             all             0.0.0.0/0               md5"
+        backup: yes
+      when: ansible_os_family == "RedHat"
+  
+    - name: Configure PostgreSQL listen_addresses (RHEL)
+      lineinfile:
+        path: /var/lib/pgsql/data/postgresql.conf
+        regexp: '^#?listen_addresses\s*='
+        line: "listen_addresses = '*'"
+        backup: yes
+      when: ansible_os_family == "RedHat"
+
+    - name: Configure PostgreSQL listen_addresses (Ubuntu)
+      lineinfile:
+        path: /etc/postgresql/14/main/postgresql.conf
+        regexp: '^#?listen_addresses\s*='
+        line: "listen_addresses = '*'"
+        backup: yes
+      when: ansible_distribution == "Ubuntu"
+      
+    - name: Find PostgreSQL version directory (Ubuntu)
+      shell: ls -d /etc/postgresql/*/main/pg_hba.conf
+      register: pg_hba_path
+      when: ansible_distribution == "Ubuntu"
+      ignore_errors: yes
+        
+    - name: Restart PostgreSQL service (RHEL)
+      systemd:
+        name: postgresql
+        state: restarted
+      when: ansible_os_family == 'RedHat'
+
+    - name: Restart PostgreSQL service (Ubuntu)
+      systemd:
+        name: postgresql
+        state: restarted
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Debug database setup results
+      debug:
+        msg: 
+          - "Database User: {{ db_user if create_custom_user | bool else 'postgres (default)' }}"
+          - "Database Name: {{ db_name if create_custom_db | bool else 'postgres (default)' }}"
+          - "Custom user creation required: {{ create_custom_user }}"
+          - "Custom database creation required: {{ create_custom_db }}"
+          - "User creation: {{ create_user_result.stdout | default(create_user_result_ubuntu.stdout) | default('Using default postgres user') }}"
+          - "Database creation: {{ create_db_result.stdout | default(create_db_result_ubuntu.stdout) | default('Using default postgres database') }}"
+          - "Privilege grant: {{ grant_privileges.stdout | default(grant_privileges_ubuntu.stdout) | default('No additional privileges granted') }}"

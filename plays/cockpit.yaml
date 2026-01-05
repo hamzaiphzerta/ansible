@@ -1,0 +1,27 @@
+---
+- name: Install Cockpit on Ubuntu
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Configure resolv.conf with Google DNS
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+
+    - name: Clear apt proxy settings
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Cockpit
+      apt:
+        name: cockpit
+        state: present
+
+    - name: Enable and start Cockpit service
+      systemd:
+        name: cockpit
+        enabled: yes
+        state: started

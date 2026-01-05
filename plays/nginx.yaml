@@ -1,0 +1,85 @@
+---
+- name: Install Nginx
+  hosts: all
+  become: true
+  vars:
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+ 
+  tasks: 
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+    
+    # Ubuntu-specific tasks   
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu" 
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+ 
+    - name: Install Nginx (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name: nginx
+        state: present
+ 
+    # RHEL-specific tasks 
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == "RedHat"
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+ 
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == "RedHat"
+      command: subscription-manager repos --enable rhel-{{ ansible_distribution_major_version }}-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+ 
+    - name: Install Nginx (RHEL)
+      when: ansible_os_family == "RedHat"
+      dnf:
+        name: nginx
+        state: present
+ 
+    # Common tasks
+    - name: Start and enable Nginx
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+ 
+    - name: Wait for Nginx to start
+      wait_for:
+        port: 80
+        timeout: 30
+ 
+    - name: Get Nginx version
+      command: nginx -v
+      register: nginx_version
+      changed_when: false
+ 
+    - name: Display Nginx version
+      debug:
+        var: nginx_version.stderr
+ 
+    - name: Print installation complete message
+      debug:
+        msg: "Nginx has been installed successfully. Access it at https://{{ morpheus['server']['internalIp'] }}"

@@ -1,0 +1,127 @@
+---
+- name: Install Jenkins on Ubuntu and RHEL
+  hosts: all
+  become: true
+  vars:
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+      
+    # Ubuntu-specific tasks
+    - name: Install Java (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name: openjdk-17-jdk
+        state: present
+        update_cache: yes
+
+    - name: Download Jenkins key (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: wget -O /usr/share/keyrings/jenkins-keyring.asc https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+
+    - name: Add Jenkins repository (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/" | tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+
+    - name: Install Jenkins (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name: jenkins
+        state: present
+      register: jenkins_install_ubuntu
+
+    # RHEL-specific tasks
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == "RedHat"
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == "RedHat"
+      command: subscription-manager repos --enable rhel-8-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+
+    - name: Install wget and Java dependencies (RHEL)
+      when: ansible_os_family == "RedHat"
+      dnf:
+        name: 
+          - wget
+          - java-17-openjdk
+          - fontconfig
+        state: present
+
+    - name: Download Jenkins repo (RHEL)
+      when: ansible_os_family == "RedHat"
+      get_url:
+        url: https://pkg.jenkins.io/redhat-stable/jenkins.repo
+        dest: /etc/yum.repos.d/jenkins.repo
+
+    - name: Import Jenkins key (RHEL)
+      when: ansible_os_family == "RedHat"
+      rpm_key:
+        key: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+        state: present
+
+    - name: Install Jenkins (RHEL)
+      when: ansible_os_family == "RedHat"
+      dnf:
+        name: jenkins
+        state: present
+      register: jenkins_install_rhel
+
+    # Common tasks for both distributions
+    - name: Start and enable Jenkins service
+      systemd:
+        name: jenkins
+        state: started
+        enabled: yes
+      when: jenkins_install_ubuntu is success or jenkins_install_rhel is success
+
+    - name: Wait for Jenkins to start
+      wait_for:
+        port: 8080
+        delay: 10
+        timeout: 300
+
+    - name: Get initial admin password
+      shell: cat /var/lib/jenkins/secrets/initialAdminPassword
+      register: jenkins_password
+      changed_when: false
+      when: jenkins_install_ubuntu is success or jenkins_install_rhel is success
+
+    - name: Display Jenkins initial admin password
+      debug:
+        var: jenkins_password.stdout
+      when: jenkins_install_ubuntu is success or jenkins_install_rhel is success
+
+    - name: Print installation complete message
+      debug:
+        msg: "Jenkins has been installed successfully. Access it at https://{{ morpheus['server']['internalIp'] }}:8080"

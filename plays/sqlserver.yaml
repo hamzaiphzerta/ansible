@@ -1,0 +1,305 @@
+---
+- name: Install and Configure SQL Server
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    sql_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('SqlServer2019!') }}"
+    db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
+    db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+    
+    # Ubuntu-specific tasks
+    - name: Handle package locks (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        systemctl stop unattended-upgrades
+        systemctl disable unattended-upgrades
+        killall unattended-upgrade-shutdown || true
+        sleep 5
+        rm -f /var/lib/dpkg/lock-frontend
+        rm -f /var/lib/dpkg/lock
+        rm -f /var/cache/apt/archives/lock
+        rm -f /var/lib/apt/lists/lock
+        dpkg --configure -a
+      ignore_errors: yes
+
+    - name: Download and install Heimdal dependencies (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        cd /tmp
+        wget -O libasn1-8-heimdal.deb http://archive.ubuntu.com/ubuntu/pool/main/h/heimdal/libasn1-8-heimdal_7.7.0+dfsg-1ubuntu1_amd64.deb
+        wget -O libhcrypto4-heimdal.deb http://archive.ubuntu.com/ubuntu/pool/main/h/heimdal/libhcrypto4-heimdal_7.7.0+dfsg-1ubuntu1_amd64.deb
+        wget -O libheimntlm0-heimdal.deb http://archive.ubuntu.com/ubuntu/pool/main/h/heimdal/libheimntlm0-heimdal_7.7.0+dfsg-1ubuntu1_amd64.deb
+        wget -O libkrb5-26-heimdal.deb http://archive.ubuntu.com/ubuntu/pool/main/h/heimdal/libkrb5-26-heimdal_7.7.0+dfsg-1ubuntu1_amd64.deb
+        wget -O libroken18-heimdal.deb http://archive.ubuntu.com/ubuntu/pool/main/h/heimdal/libroken18-heimdal_7.7.0+dfsg-1ubuntu1_amd64.deb
+        wget -O libgssapi3-heimdal.deb http://archive.ubuntu.com/ubuntu/pool/main/h/heimdal/libgssapi3-heimdal_7.7.0+dfsg-1ubuntu1_amd64.deb
+        
+        dpkg -i libroken18-heimdal.deb
+        dpkg -i libasn1-8-heimdal.deb
+        dpkg -i libhcrypto4-heimdal.deb
+        dpkg -i libheimntlm0-heimdal.deb
+        dpkg -i libkrb5-26-heimdal.deb
+        dpkg -i libgssapi3-heimdal.deb
+        
+        apt-get -f install -y
+      ignore_errors: yes
+
+    - name: Download and install libldap package (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        cd /tmp
+        wget -O libldap-2.4-2.deb http://archive.ubuntu.com/ubuntu/pool/main/o/openldap/libldap-2.4-2_2.4.49+dfsg-2ubuntu1.10_amd64.deb
+        dpkg -i libldap-2.4-2.deb
+
+    - name: Import Microsoft GPG key
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /etc/apt/trusted.gpg.d/microsoft.gpg
+
+    - name: Add SQL Server repository
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        curl https://packages.microsoft.com/config/ubuntu/22.04/mssql-server-2022.list > /etc/apt/sources.list.d/mssql-server.list
+
+    - name: Update apt cache
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+
+    - name: Install SQL Server
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        ACCEPT_EULA=Y DEBIAN_FRONTEND=noninteractive apt-get install -y mssql-server
+
+    - name: Configure system for SQL Server (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        # Stop SQL Server if running
+        systemctl stop mssql-server || true
+        
+        # Create and set permissions for SQL Server directories
+        mkdir -p /var/opt/mssql
+        chown -R mssql:mssql /var/opt/mssql
+        chmod -R 755 /var/opt/mssql
+        
+        # Configure system limits for SQL Server
+        echo "mssql soft nofile 65535" > /etc/security/limits.d/mssql.conf
+        echo "mssql hard nofile 65535" >> /etc/security/limits.d/mssql.conf
+        echo "mssql soft nproc 4096" >> /etc/security/limits.d/mssql.conf
+        echo "mssql hard nproc 4096" >> /etc/security/limits.d/mssql.conf
+        
+        # Reload system limits
+        sysctl -p
+
+    - name: Configure SQL Server (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        ACCEPT_EULA=Y MSSQL_SA_PASSWORD="{{ sql_password }}" MSSQL_PID=Express /opt/mssql/bin/mssql-conf setup
+
+    - name: Start SQL Server service with delay
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        systemctl daemon-reload
+        systemctl enable mssql-server
+        systemctl start mssql-server
+        sleep 10
+
+    # RHEL-specific tasks
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager repos --enable rhel-{{ ansible_distribution_major_version }}-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+
+    - name: Download SQL Server repository (RHEL)
+      when: ansible_os_family == 'RedHat'
+      get_url:
+        url: https://packages.microsoft.com/config/rhel/8/mssql-server-2019.repo
+        dest: /etc/yum.repos.d/mssql-server.repo
+
+    - name: Install SQL Server (RHEL)
+      when: ansible_os_family == 'RedHat'
+      yum:
+        name: mssql-server
+        state: present
+        disable_gpg_check: yes
+    
+    - name: Configure system for SQL Server (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: |
+        # Stop SQL Server if running
+        systemctl stop mssql-server || true
+        
+        # Create and set permissions for SQL Server directories
+        mkdir -p /var/opt/mssql
+        chown -R mssql:mssql /var/opt/mssql
+        chmod -R 755 /var/opt/mssql
+        
+        # Configure system limits for SQL Server
+        echo "mssql soft nofile 65535" > /etc/security/limits.d/mssql.conf
+        echo "mssql hard nofile 65535" >> /etc/security/limits.d/mssql.conf
+        echo "mssql soft nproc 4096" >> /etc/security/limits.d/mssql.conf
+        echo "mssql hard nproc 4096" >> /etc/security/limits.d/mssql.conf
+        
+        sysctl -p
+
+    - name: Stop SQL Server before configuration (RHEL)
+      when: ansible_os_family == "RedHat"
+      systemd:
+        name: mssql-server
+        state: stopped
+
+    - name: Configure SQL Server (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: |
+        ACCEPT_EULA=Y MSSQL_SA_PASSWORD="{{ sql_password }}" MSSQL_PID=Express /opt/mssql/bin/mssql-conf setup
+
+    - name: Start SQL Server (RHEL)
+      when: ansible_os_family == "RedHat"
+      systemd:
+        name: mssql-server
+        state: started
+        enabled: yes
+
+    # Ubuntu tools installation
+    - name: Add Microsoft tools repository (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list > /etc/apt/sources.list.d/msprod.list
+      args:
+        creates: /etc/apt/sources.list.d/msprod.list
+
+    - name: Install aptitude
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        pkill -9 unattended-upgrades || true
+        systemctl stop unattended-upgrades
+        systemctl disable unattended-upgrades
+        sleep 5
+        rm -f /var/lib/dpkg/lock*
+        rm -f /var/cache/apt/archives/lock
+        rm -f /var/lib/apt/lists/lock
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y aptitude
+      ignore_errors: true
+
+    - name: Install MSSQL tools (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        ACCEPT_EULA="Y" DEBIAN_FRONTEND=noninteractive aptitude install -y mssql-tools
+      retries: 3
+      delay: 10
+      register: result
+      until: result is not failed
+
+    # RHEL tools installation
+    - name: Download EPEL RPM (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: |
+        curl --insecure https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm -o /tmp/epel-release.rpm
+
+    - name: Install EPEL RPM (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: |
+        rpm -ivh /tmp/epel-release.rpm
+      ignore_errors: true
+
+    - name: Import Microsoft repository key (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: |
+        rpm --import https://packages.microsoft.com/keys/microsoft.asc
+      ignore_errors: true
+
+    - name: Install prerequisites (RHEL)
+      when: ansible_os_family == "RedHat"
+      dnf:
+        name: 
+          - unixODBC-devel
+        state: present
+        disable_gpg_check: yes
+
+    - name: Install MSSQL tools repository (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: |
+        curl --insecure https://packages.microsoft.com/config/rhel/8/prod.repo > /etc/yum.repos.d/msprod.repo
+      args:
+        creates: /etc/yum.repos.d/msprod.repo
+
+    - name: Clean and refresh dnf cache (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: |
+        dnf clean all
+        dnf makecache
+
+    - name: Install MSSQL tools (RHEL)
+      when: ansible_os_family == "RedHat"
+      dnf:
+        name: mssql-tools
+        state: present
+        disable_gpg_check: yes
+      environment:
+        ACCEPT_EULA: "Y"
+
+    # Add to PATH for both distributions
+    - name: Add SQL tools to PATH
+      lineinfile:
+        path: /etc/profile.d/mssql-tools.sh
+        line: 'export PATH="$PATH:/opt/mssql-tools/bin"'
+        create: yes
+        mode: '0644'
+
+    # Final common tasks
+    - name: Wait for SQL Server to start
+      wait_for:
+        port: 1433
+        timeout: 300
+
+    - name: Create database if db_name is provided
+      when: db_name != ''
+      shell: |
+        /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P "{{ sql_password }}" -Q "CREATE DATABASE {{ db_name }}"
+      register: db_creation
+      failed_when: db_creation.rc != 0 and 'already exists' not in db_creation.stderr
+
+    - name: Create login and user if db_user is provided
+      when: db_user != '' and db_name != ''
+      shell: |
+        /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P "{{ sql_password }}" -Q "
+        CREATE LOGIN {{ db_user }} WITH PASSWORD = '{{ sql_password }}';
+        GO
+        USE {{ db_name }};
+        GO
+        CREATE USER {{ db_user }} FOR LOGIN {{ db_user }};
+        ALTER ROLE db_owner ADD MEMBER {{ db_user }};"
+      register: user_creation
+      failed_when: false

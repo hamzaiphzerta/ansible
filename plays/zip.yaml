@@ -1,0 +1,200 @@
+---
+- name: Prepare Hadoop Installation for Ubuntu
+  hosts: all
+  become: yes
+  vars:
+    hadoop_user: "hadoop"
+    hadoop_group: "hadoop"
+    hadoop_home: "/home/hadoop"
+    hadoop_version: "3.3.6"
+    hadoop_mirrors:
+      - "https://dlcdn.apache.org/hadoop/common/hadoop-{{ hadoop_version }}/hadoop-{{ hadoop_version }}.tar.gz"
+      - "https://downloads.apache.org/hadoop/common/hadoop-{{ hadoop_version }}/hadoop-{{ hadoop_version }}.tar.gz"
+      - "https://archive.apache.org/dist/hadoop/common/hadoop-{{ hadoop_version }}/hadoop-{{ hadoop_version }}.tar.gz"
+
+  pre_tasks:
+    - name: Update Ubuntu apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Java and required packages for Ubuntu
+      apt:
+        name: 
+          - default-jdk
+          - default-jre
+          - wget
+          - openssh-server
+          - ssh
+        state: present
+
+    - name: Ensure group exists
+      group:
+        name: "{{ hadoop_group }}"
+        state: present
+
+    - name: Create Hadoop user
+      user:
+        name: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        home: "{{ hadoop_home }}"
+        shell: /bin/bash
+        create_home: yes
+        state: present
+
+  tasks:
+    - name: Create Hadoop download directory
+      file:
+        path: "{{ hadoop_home }}/downloads"
+        state: directory
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Download Hadoop using wget with multiple mirrors
+      shell: |
+        set -o pipefail
+        for mirror in {{ hadoop_mirrors | join(' ') }}; do
+          wget --tries=3 \
+               --timeout=300 \
+               --no-check-certificate \
+               -O "{{ hadoop_home }}/downloads/hadoop-{{ hadoop_version }}.tar.gz" \
+               "$mirror" && exit 0
+        done
+        exit 1
+      args:
+        creates: "{{ hadoop_home }}/downloads/hadoop-{{ hadoop_version }}.tar.gz"
+        executable: /bin/bash
+      register: wget_download
+      changed_when: wget_download.rc == 0
+      failed_when: wget_download.rc != 0
+
+    - name: Verify downloaded file
+      stat:
+        path: "{{ hadoop_home }}/downloads/hadoop-{{ hadoop_version }}.tar.gz"
+      register: hadoop_download_file
+
+    - name: Check download file size
+      assert:
+        that:
+          - hadoop_download_file.stat.exists
+          - hadoop_download_file.stat.size > 100000000
+        fail_msg: "Download failed or file is too small"
+
+    - name: Extract Hadoop archive
+      unarchive:
+        src: "{{ hadoop_home }}/downloads/hadoop-{{ hadoop_version }}.tar.gz"
+        dest: "{{ hadoop_home }}"
+        remote_src: yes
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+
+    - name: Create symbolic link for Hadoop
+      file:
+        src: "{{ hadoop_home }}/hadoop-{{ hadoop_version }}"
+        dest: "{{ hadoop_home }}/hadoop"
+        state: link
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+
+    - name: Create Hadoop lib directory
+      file:
+        path: "/usr/local/hadoop/lib"
+        state: directory
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Download javax.activation-api-1.2.0.jar
+      get_url:
+        url: "https://jcenter.bintray.com/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar"
+        dest: "/usr/local/hadoop/lib/javax.activation-api-1.2.0.jar"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+
+    - name: Configure environment variables in .bashrc
+      blockinfile:
+        path: "{{ hadoop_home }}/.bashrc"
+        block: |
+          export HADOOP_HOME=/usr/local/hadoop
+          export HADOOP_INSTALL=$HADOOP_HOME
+          export HADOOP_MAPRED_HOME=$HADOOP_HOME
+          export HADOOP_COMMON_HOME=$HADOOP_HOME
+          export HADOOP_HDFS_HOME=$HADOOP_HOME
+          export YARN_HOME=$HADOOP_HOME
+          export HADOOP_COMMON_LIB_NATIVE_DIR=$HADOOP_HOME/lib/native
+          export PATH=$PATH:$HADOOP_HOME/sbin:$HADOOP_HOME/bin
+          export HADOOP_OPTS="-Djava.library.path=$HADOOP_HOME/lib/native"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+
+    - name: Source .bashrc
+      shell: "source {{ hadoop_home }}/.bashrc"
+      args:
+        executable: /bin/bash
+
+    - name: Configure Hadoop environment in hadoop-env.sh
+      lineinfile:
+        path: "{{ hadoop_home }}/hadoop/etc/hadoop/hadoop-env.sh"
+        line: "export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64"
+        state: present
+
+    - name: Add Hadoop classpath in hadoop-env.sh
+      lineinfile:
+        path: "{{ hadoop_home }}/hadoop/etc/hadoop/hadoop-env.sh"
+        line: "export HADOOP_CLASSPATH+=\" $HADOOP_HOME/lib/*.jar\""
+        state: present
+
+    - name: Configure core-site.xml
+      blockinfile:
+        path: "{{ hadoop_home }}/hadoop/etc/hadoop/core-site.xml"
+        block: |
+          <property>
+            <name>fs.default.name</name>
+            <value>hdfs://0.0.0.0:9000</value>
+            <description>The default file system URI</description>
+          </property>
+
+    - name: Create Hadoop directories
+      file:
+        path: "/home/hadoop/hdfs/{{ item }}"
+        state: directory
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+      loop:
+        - namenode
+        - datanode
+
+    - name: Configure hdfs-site.xml
+      blockinfile:
+        path: "{{ hadoop_home }}/hadoop/etc/hadoop/hdfs-site.xml"
+        block: |
+          <property>
+            <name>dfs.replication</name>
+            <value>1</value>
+          </property>
+          <property>
+            <name>dfs.name.dir</name>
+            <value>file:///home/hadoop/hdfs/namenode</value>
+          </property>
+          <property>
+            <name>dfs.data.dir</name>
+            <value>file:///home/hadoop/hdfs/datanode</value>
+          </property>
+
+    - name: Format Namenode
+      shell: "hdfs namenode -format"
+      become: yes
+      become_user: "{{ hadoop_user }}"
+
+    - name: Start HDFS and YARN
+      shell: |
+        start-dfs.sh
+        start-yarn.sh
+      become: yes
+      become_user: "{{ hadoop_user }}"
+
+    - name: Verify Hadoop processes
+      shell: "jps"
+      become: yes
+      become_user: "{{ hadoop_user }}"

@@ -1,0 +1,172 @@
+---
+- name: Install WildFly
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    wildfly_version: "34.0.0.Final"
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+    
+    # Ubuntu-specific tasks  
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+
+    - name: Install OpenJDK 17 and wget (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name: 
+          - openjdk-17-jdk
+          - wget
+        state: present
+
+    # RHEL-specific tasks
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager repos --enable rhel-8-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+
+    - name: Install OpenJDK 17 and wget (RHEL)
+      when: ansible_os_family == 'RedHat'
+      dnf:
+        name: 
+          - java-11-openjdk-devel
+          - wget
+        state: present
+        disable_gpg_check: yes
+
+    # Common tasks for both distributions
+    - name: Create WildFly group
+      group:
+        name: wildfly
+        system: yes
+        state: present
+
+    - name: Create WildFly user
+      user:
+        name: wildfly
+        group: wildfly
+        system: yes
+        shell: /sbin/nologin
+        home: /opt/wildfly
+        create_home: no
+
+    # Ubuntu-specific download task
+    - name: Download WildFly using wget (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        wget --no-check-certificate \
+        --timeout=60 \
+        "https://github.com/wildfly/wildfly/releases/download/{{ wildfly_version }}/wildfly-{{ wildfly_version }}.tar.gz" \
+        -O "/tmp/wildfly-{{ wildfly_version }}.tar.gz"
+      args:
+        creates: "/tmp/wildfly-{{ wildfly_version }}.tar.gz"
+
+    # Redhat-specific download task
+    - name: Download WildFly using wget
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        wget \
+        https://github.com/wildfly/wildfly/releases/download/{{ wildfly_version }}/wildfly-{{ wildfly_version }}.tar.gz \
+        -O /tmp/wildfly-{{ wildfly_version }}.tar.gz
+      args:
+        creates: "/tmp/wildfly-{{ wildfly_version }}.tar.gz"
+
+    - name: Extract WildFly archive
+      shell: |
+        tar xf /tmp/wildfly-{{ wildfly_version }}.tar.gz -C /opt/
+      args:
+        creates: "/opt/wildfly-{{ wildfly_version }}"
+
+    - name: Create symbolic link
+      file:
+        src: "/opt/wildfly-{{ wildfly_version }}"
+        dest: /opt/wildfly
+        state: link
+        force: yes
+
+    - name: Set WildFly ownership
+      file:
+        path: "/opt/wildfly-{{ wildfly_version }}"
+        owner: wildfly
+        group: wildfly
+        recurse: yes
+
+    - name: Create WildFly configuration directory
+      file:
+        path: /etc/wildfly
+        state: directory
+
+    - name: Copy WildFly configuration files
+      shell: |
+        cp /opt/wildfly/docs/contrib/scripts/systemd/wildfly.conf /etc/wildfly/
+        cp /opt/wildfly/docs/contrib/scripts/systemd/wildfly.service /etc/systemd/system/
+        cp /opt/wildfly/docs/contrib/scripts/systemd/launch.sh /opt/wildfly/bin/
+
+    - name: Make scripts executable
+      shell: |
+        chmod +x /opt/wildfly/bin/*.sh
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    # RHEL Firewall Configuration
+    - name: Configure firewall for WildFly (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        firewall-cmd --permanent --add-port={8080,9990}/tcp
+        firewall-cmd --reload
+  
+    - name: Start and enable WildFly service
+      systemd:
+        name: wildfly
+        state: started
+        enabled: yes
+
+    - name: Clean up downloaded files
+      file:
+        path: "/tmp/wildfly-{{ wildfly_version }}.tar.gz"
+        state: absent
+      ignore_errors: yes
+
+    - name: Wait for WildFly to start
+      wait_for:
+        port: 8080
+        delay: 10
+        timeout: 60
+
+    - name: Display WildFly installation complete message
+      debug:
+        msg: "WildFly has been installed successfully. Access it at http://{{ morpheus['server']['internalIp'] }}:8080"

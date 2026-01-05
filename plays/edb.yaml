@@ -1,0 +1,100 @@
+---
+- name: Installation de Netdata sur Ubuntu
+  hosts: all
+  become: yes
+  vars:
+    edb_version: 17
+  pre_tasks:
+    - name: Remove existing proxy configuration
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/apt.conf.d/proxy.conf
+        - /etc/environment
+        
+    - name: Unset proxy environment variables
+      lineinfile:
+        path: /etc/environment
+        state: absent
+        regexp: "{{ item }}"
+      loop:
+        - '^HTTP_PROXY='
+        - '^HTTPS_PROXY='
+        - '^http_proxy='
+        - '^https_proxy='
+        
+    - name: Configure direct APT access
+      copy:
+        content: |
+          Acquire::http::Proxy "false";
+          Acquire::https::Proxy "false";
+        dest: /etc/apt/apt.conf.d/99no-proxy
+        mode: 0644
+        
+  tasks:
+    # DNS configuration
+    - name: Configure resolv.conf with Google DNS
+      copy:
+        content: "nameserver {{ dns_server }}\n"
+        dest: /etc/resolv.conf
+        mode: 0644
+        
+    - name: Prepare APT for package installation
+      block:
+        - name: Clean APT lists
+          command: rm -rf /var/lib/apt/lists/*
+          
+        - name: Update APT cache forcefully
+          apt:
+            update_cache: yes
+            force_apt_get: yes
+          register: apt_update
+          retries: 3
+          delay: 5
+          until: apt_update is success
+    
+    # Netdata installation tasks
+    - name: Installation des dépendances
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - zlib1g-dev
+          - libuuid1
+          - libmnl0
+          - pkg-config
+          - cmake
+          - automake
+          - autoconf
+        state: present
+
+    - name: Téléchargement du script d'installation de Netdata
+      get_url:
+        url: https://my-netdata.io/kickstart.sh
+        dest: /tmp/netdata-kickstart.sh
+        mode: '0755'
+
+    - name: Exécution du script d'installation de Netdata
+      command: /bin/bash /tmp/netdata-kickstart.sh --no-updates --stable-channel --disable-telemetry
+      args:
+        creates: /usr/sbin/netdata
+
+    - name: Démarrage et activation du service Netdata
+      systemd:
+        name: netdata
+        state: started
+        enabled: yes
+
+    - name: Vérification que Netdata est en cours d'exécution
+      uri:
+        url: http://localhost:19999/api/v1/info
+        return_content: yes
+      register: netdata_status
+      ignore_errors: true
+
+    - name: Affichage de l'état de Netdata
+      debug:
+        msg: "Netdata est installé et fonctionne correctement"
+      when: netdata_status is success

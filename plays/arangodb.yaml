@@ -1,0 +1,118 @@
+---
+- name: Install and Configure ArangoDB
+  hosts: all
+  become: yes
+  vars:
+    db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
+    db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
+    db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
+    root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+    
+    - name: Add ArangoDB GPG key
+      apt_key:
+        url: https://download.arangodb.com/arangodb312/DEBIAN/Release.key
+        state: present
+
+    - name: Add ArangoDB repository
+      apt_repository:
+        repo: "deb https://download.arangodb.com/arangodb312/DEBIAN/ /"
+        state: present
+        filename: arangodb
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install ArangoDB
+      apt:
+        name: arangodb3
+        state: present
+
+    - name: Enable and start ArangoDB service
+      service:
+        name: arangodb3
+        state: started
+        enabled: yes
+
+    - name: Wait for ArangoDB to be ready
+      wait_for:
+        host: 127.0.0.1
+        port: 8529
+        delay: 5
+        timeout: 30
+
+    - name: Set ArangoDB root password
+      shell: |
+        arangosh \
+          --server.endpoint tcp://127.0.0.1:8529 \
+          --javascript.execute-string "require('@arangodb/users').update('root', '{{ root_password }}');"
+
+    - name: Enable authentication in ArangoDB configuration
+      lineinfile:
+        path: /etc/arangodb3/arangod.conf
+        regexp: '^#?authentication'
+        line: 'authentication = true'
+        insertafter: '[server]'
+
+    - name: Restart ArangoDB service
+      service:
+        name: arangodb3
+        state: restarted
+
+    - name: Proceed with database setup if credentials are provided
+      block:
+        - name: Create ArangoDB database
+          shell: |
+            arangosh \
+              --server.endpoint tcp://127.0.0.1:8529 \
+              --server.username root \
+              --server.password '{{ root_password }}' \
+              --javascript.execute-string "db._createDatabase('{{ db_name }}');"
+
+        - name: Create ArangoDB user
+          shell: |
+            arangosh \
+              --server.endpoint tcp://127.0.0.1:8529 \
+              --server.username root \
+              --server.password '{{ root_password }}' \
+              --javascript.execute-string "require('@arangodb/users').save('{{ db_user }}', '{{ db_password }}');"
+
+        - name: Grant user access to database
+          shell: |
+            arangosh \
+              --server.endpoint tcp://127.0.0.1:8529 \
+              --server.username root \
+              --server.password '{{ root_password }}' \
+              --javascript.execute-string "require('@arangodb/users').grantDatabase('{{ db_user }}', '{{ db_name }}');"
+      when:
+        - db_name != ''
+        - db_user != ''
+        - db_password != ''
+        - root_password != ''
+
+    - name: Skip database setup if credentials are not provided
+      debug:
+        msg: "Database credentials not provided; skipping database and user creation."
+      when:
+        - db_name == '' or db_user == '' or db_password == '' or root_password == ''

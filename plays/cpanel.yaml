@@ -1,0 +1,72 @@
+---
+- name: Configure system and install cPanel
+  hosts: all
+  become: true
+  vars:
+    domain_suffix: "atlascs.ma" 
+  tasks:
+
+    - name: apt conf
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    - name: Ensure /etc/resolv.conf contains the required nameserver
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 8.8.8.8
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Save current iptables rules
+      shell: iptables-save > ~/firewall.rules
+
+    - name: Stop UFW service
+      service:
+        name: ufw
+        state: stopped
+
+    - name: Disable UFW service
+      service:
+        name: ufw
+        enabled: no
+
+    - name: Update APT package index
+      apt:
+        update_cache: yes
+
+    - name: Upgrade APT packages
+      apt:
+        upgrade: dist
+
+    - name: Set system hostname
+      hostname:
+        name: "{{ inventory_hostname }}.{{ domain_suffix }}"
+
+    - name: Download the latest cPanel installer
+      get_url:
+        url: https://securedownloads.cpanel.net/latest
+        dest: /home/latest
+        mode: '0755'
+
+    - name: Run the cPanel installer
+      command: sh /home/latest
+      ignore_errors: yes
+
+    - name: Create the EasyApache 4 marker file
+      file:
+        path: /etc/cpanel/ea4/is_ea4
+        state: touch
+
+    - name: Export CPANEL_BASE_INSTALL environment variable
+      lineinfile:
+        path: /etc/environment
+        line: 'CPANEL_BASE_INSTALL=1'
+        state: present
+
+    - name: Load CPANEL_BASE_INSTALL variable into current environment
+      shell: export CPANEL_BASE_INSTALL=1
+      args:
+        executable: /bin/bash
+
+    - name: Run the cPanel initial install script
+      command: /usr/local/cpanel/scripts/cpanel_initial_install

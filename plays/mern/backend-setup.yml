@@ -1,0 +1,104 @@
+---
+- name: Setup Backend Node
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    nodejs_version: "18.x"
+    app_user: "{{ ansible_user }}"
+    backend_dir: "/home/{{ app_user }}/backend"
+    db_ip: "{{ morpheus['instance']['containers'] | selectattr('hostname', 'equalto', 'mern-database') | map(attribute='externalIp') | first }}"
+
+  tasks:
+    - name: Add NodeSource repository
+      shell: |
+        curl -fsSL https://deb.nodesource.com/setup_{{ nodejs_version }} | bash -
+    
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+
+    - name: Create backend directory
+      file:
+        path: "{{ backend_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+
+    - name: Initialize backend package.json
+      copy:
+        content: |
+          {
+            "name": "mern-backend",
+            "version": "1.0.0",
+            "main": "index.js",
+            "dependencies": {
+              "express": "^4.18.2",
+              "mongodb": "^5.0.0",
+              "cors": "^2.8.5",
+              "dotenv": "^16.0.3"
+            }
+          }
+        dest: "{{ backend_dir }}/package.json"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+
+    - name: Install backend dependencies
+      command: npm install
+      args:
+        chdir: "{{ backend_dir }}"
+      become: yes
+      become_user: "{{ app_user }}"
+
+    - name: Create Express server file
+      copy:
+        content: |
+          require('dotenv').config();
+          const express = require('express');
+          const cors = require('cors');
+          const { MongoClient } = require('mongodb');
+          
+          const app = express();
+          const port = 3000;
+          
+          app.use(cors());
+          app.use(express.json());
+          
+          const mongoUrl = `mongodb://{{ db_ip }}:27017/mernapp`;
+          
+          app.get('/api/test', async (req, res) => {
+            try {
+              const client = await MongoClient.connect(mongoUrl);
+              const db = client.db();
+              await db.command({ ping: 1 });
+              client.close();
+              res.json({ message: 'Backend and Database connection successful!' });
+            } catch (error) {
+              res.status(500).json({ error: error.message });
+            }
+          });
+          
+          app.listen(port, '0.0.0.0', () => {
+            console.log(`Server running on port ${port}`);
+          });
+        dest: "{{ backend_dir }}/index.js"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+
+    - name: Create environment file
+      copy:
+        content: |
+          DB_HOST="{{ db_ip }}"
+        dest: "{{ backend_dir }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0600'
+
+    - name: Start Node.js application with screen
+      shell: screen -dmS nodejs bash -c 'cd {{ backend_dir }} && node index.js'
+      become: yes
+      become_user: "{{ app_user }}"

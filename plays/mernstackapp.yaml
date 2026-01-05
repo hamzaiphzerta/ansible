@@ -1,0 +1,227 @@
+---
+- name: Install MERN Stack on Ubuntu
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    nodejs_version: "18.x"
+    mongodb_version: "6.0"
+    app_user: "{{ ansible_user }}"
+    app_dir: "/home/{{ app_user }}/myapp"
+    frontend_dir: "{{ app_dir }}/frontend"
+    backend_dir: "{{ app_dir }}/backend"
+
+  tasks:
+    # System setup
+    - name: apt conf
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    - name: Ensure /etc/resolv.conf contains the required nameserver
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 8.8.8.8
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install packages
+      apt:
+        name:
+          - gnupg
+          - build-essential
+          - wget
+        state: present
+        update_cache: true
+        update_cache_retries: 5
+        update_cache_retry_max_delay: 12
+
+    # Node.js installation
+    - name: Add NodeSource repository
+      shell: |
+        curl -fsSL https://deb.nodesource.com/setup_{{ nodejs_version }} | bash -
+    
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+
+    # MongoDB installation
+    - name: Add MongoDB GPG key
+      apt_key:
+        url: https://www.mongodb.org/static/pgp/server-{{ mongodb_version }}.asc
+        state: present
+
+    - name: Add MongoDB repository
+      apt_repository:
+        repo: "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu {{ ansible_distribution_release }}/mongodb-org/{{ mongodb_version }} multiverse"
+        state: present
+        filename: mongodb-org-{{ mongodb_version }}
+
+    - name: Install MongoDB
+      apt:
+        name: mongodb-org
+        state: present
+        update_cache: yes
+
+    - name: Start and enable MongoDB
+      systemd:
+        name: mongod
+        state: started
+        enabled: yes
+
+    # NGINX installation and configuration
+    - name: Install NGINX
+      apt:
+        name: nginx
+        state: present
+
+    - name: Create NGINX configuration
+      copy:
+        content: |
+          server {
+              listen 80;
+              server_name localhost;
+
+              location / {
+                  proxy_pass http://localhost:3000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+              }
+          }
+        dest: /etc/nginx/sites-available/myapp
+        mode: '0644'
+
+    - name: Create symbolic link for NGINX config
+      file:
+        src: /etc/nginx/sites-available/myapp
+        dest: /etc/nginx/sites-enabled/myapp
+        state: link
+
+    - name: Remove default NGINX site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Reload NGINX
+      systemd:
+        name: nginx
+        state: reloaded
+
+    # Application setup
+    - name: Create application directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+      with_items:
+        - "{{ frontend_dir }}"
+        - "{{ backend_dir }}"
+
+    - name: Initialize React frontend
+      command: npx create-react-app . --use-npm
+      args:
+        chdir: "{{ frontend_dir }}"
+        creates: "{{ frontend_dir }}/package.json"
+      become: yes
+      become_user: "{{ app_user }}"
+      environment:
+        CI: "true"
+
+    - name: Install additional frontend dependencies
+      command: npm install {{ item }}
+      args:
+        chdir: "{{ frontend_dir }}"
+      with_items:
+        - web-vitals
+        - "@babel/plugin-proposal-private-property-in-object"
+      become: yes
+      become_user: "{{ app_user }}"
+        
+    - name: Initialize backend package.json
+      copy:
+        content: |
+          {
+            "name": "mern-backend",
+            "version": "1.0.0",
+            "main": "index.js",
+            "dependencies": {
+              "express": "^4.18.2",
+              "mongodb": "^5.0.0"
+            }
+          }
+        dest: "{{ backend_dir }}/package.json"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+
+    - name: Install backend dependencies
+      command: npm install
+      args:
+        chdir: "{{ backend_dir }}"
+      become: yes
+      become_user: "{{ app_user }}"
+
+    - name: Create simple Express server file
+      copy:
+        content: |
+          const express = require('express');
+          const path = require('path');
+          
+          const app = express();
+          const port = 3000;
+          
+          // Serve static files from React build
+          app.use(express.static(path.join(__dirname, 'frontend')));
+          
+          // Simple test API endpoint
+          app.get('/api/test', (req, res) => {
+            res.json({ message: 'Backend is working!' });
+          });
+          
+          // Handle React routing, return all requests to React app
+          app.get('*', (req, res) => {
+            res.sendFile(path.join(__dirname, 'frontend', 'index.html'));
+          });
+          
+          app.listen(port, '0.0.0.0', () => {
+            console.log(`Server running on port ${port}`);
+          });
+        dest: "{{ backend_dir }}/index.js"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+
+    - name: Build React app
+      command: npm run build
+      args:
+        chdir: "{{ frontend_dir }}"
+      become: yes
+      become_user: "{{ app_user }}"
+      environment:
+        CI: "true"
+  
+    - name: Move React build to backend
+      command: mv {{ frontend_dir }}/build {{ backend_dir }}/frontend
+      args:
+        creates: "{{ backend_dir }}/frontend"
+      become: yes
+      become_user: "{{ app_user }}"
+
+    - name: Start Node.js application with screen
+      shell: screen -dmS nodejs bash -c 'cd {{ backend_dir }} && node index.js'
+      become: yes
+      become_user: "{{ app_user }}"
+
+    - name: Display completion message
+      debug:
+        msg: |
+          MERN stack installation complete and application started!
+          
+          Application is running at http://{{ morpheus['server']['internalIp'] }}          
+          To check the running application:
+          screen -r nodejs

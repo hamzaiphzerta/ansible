@@ -1,0 +1,162 @@
+---
+- name: Install Squid Proxy on Ubuntu and RHEL
+  hosts: all
+  become: true
+  vars:
+    proxy_port: 3128
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+      
+    # Ubuntu-specific tasks
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+
+    - name: Install Squid (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name: squid
+        state: present
+
+    - name: Create cache directory (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      file:
+        path: /var/spool/squid
+        state: directory
+        owner: proxy
+        group: proxy
+        mode: '0755'
+
+    # RHEL-specific tasks
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == "RedHat"
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == "RedHat"
+      command: subscription-manager repos --enable rhel-8-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+
+    - name: Install Squid (RHEL)
+      when: ansible_os_family == "RedHat"
+      dnf:
+        name: squid
+        state: present
+
+    - name: Create cache directory (RHEL)
+      when: ansible_os_family == "RedHat"
+      file:
+        path: /var/spool/squid
+        state: directory
+        owner: squid
+        group: squid
+        mode: '0755'
+
+    # Common tasks for both distributions
+    - name: Create Squid configuration backup
+      copy:
+        src: /etc/squid/squid.conf
+        dest: /etc/squid/squid.conf.backup
+        remote_src: yes
+      ignore_errors: yes
+
+    - name: Configure Squid
+      copy:
+        dest: /etc/squid/squid.conf
+        content: |
+          # Basic Squid configuration
+          http_port {{ proxy_port }}
+
+          # Access Control Lists (ACLs)
+          acl localnet src 10.0.0.0/8
+          acl localnet src 172.16.0.0/12
+          acl localnet src 192.168.0.0/16
+          acl SSL_ports port 443
+          acl Safe_ports port 80          # http
+          acl Safe_ports port 21          # ftp
+          acl Safe_ports port 443         # https
+          acl Safe_ports port 70          # gopher
+          acl Safe_ports port 210         # wais
+          acl Safe_ports port 1025-65535  # unregistered ports
+          acl Safe_ports port 280         # http-mgmt
+          acl Safe_ports port 488         # gss-http
+          acl Safe_ports port 591         # filemaker
+          acl Safe_ports port 777         # multiling http
+          acl CONNECT method CONNECT
+
+          # Access Rules
+          http_access deny !Safe_ports
+          http_access deny CONNECT !SSL_ports
+          http_access allow localhost manager
+          http_access deny manager
+          http_access allow localnet
+          http_access allow localhost
+          http_access deny all
+
+          # Cache settings
+          cache_dir ufs /var/spool/squid 1000 16 256
+          coredump_dir /var/spool/squid
+          cache_mem 256 MB
+          maximum_object_size 100 MB
+          cache_replacement_policy lru
+
+          # Logging
+          access_log /var/log/squid/access.log squid
+          cache_log /var/log/squid/cache.log
+          cache_store_log /var/log/squid/store.log
+
+          # Refresh patterns
+          refresh_pattern ^ftp:           1440    20%     10080
+          refresh_pattern ^gopher:        1440    0%      1440
+          refresh_pattern -i (/cgi-bin/|\?) 0     0%      0
+          refresh_pattern .               0       20%     4320
+
+    - name: Initialize Squid cache
+      command: squid -z
+      ignore_errors: yes
+
+    - name: Enable and start Squid service
+      systemd:
+        name: squid
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for Squid to start
+      wait_for:
+        port: "{{ proxy_port }}"
+        timeout: 60
+
+    - name: Print installation complete message
+      debug:
+        msg:
+          - "Squid Proxy has been installed successfully."
+          - "Proxy is accessible at: http://{{ ansible_default_ipv4.address }}:{{ proxy_port }}"
+          - "Configuration file location: /etc/squid/squid.conf"
+          - "Log files location: /var/log/squid/"

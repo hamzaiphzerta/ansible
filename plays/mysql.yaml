@@ -1,0 +1,135 @@
+---
+- name: Install and Configure MySQL
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    mysql_root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('rootroot') }}"
+    db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
+    db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
+    db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+      
+    # Ubuntu-specific tasks
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install MySQL Server (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name: mysql-server
+        state: present
+
+    - name: Set MySQL root password (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        mysql --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED WITH 'mysql_native_password' BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+      ignore_errors: true
+
+    # RHEL-specific tasks
+
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager repos --enable rhel-{{ ansible_distribution_major_version }}-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+
+    - name: Remove existing MySQL if exists (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        rpm -qa | grep -i mysql | xargs rpm -e --nodeps || true
+      ignore_errors: yes
+
+    - name: Download MySQL repo RPM (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        curl -L https://repo.mysql.com/mysql80-community-release-el{{ ansible_distribution_major_version }}-1.noarch.rpm -o /tmp/mysql80-community-release.rpm
+
+    - name: Install MySQL repo RPM (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        rpm -ivh /tmp/mysql80-community-release.rpm
+      ignore_errors: yes
+
+    - name: Import MySQL GPG Key (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        rpm --import https://repo.mysql.com/RPM-GPG-KEY-mysql-2022
+
+    - name: Clean yum cache and enable MySQL module (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        yum clean all
+        rm -rf /var/cache/yum
+        dnf module reset mysql -y
+        dnf module disable mysql -y
+        yum makecache
+
+    - name: Install MySQL packages (RHEL)
+      when: ansible_os_family == 'RedHat'
+      dnf:
+        name: mysql-server
+        state: present
+        disable_gpg_check: yes
+
+    - name: Initialize MySQL data directory and start service (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        systemctl enable mysqld
+        systemctl start mysqld
+      ignore_errors: true
+
+    - name: Set root password (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        mysql -u root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+      ignore_errors: true
+
+    # Start MySQL service for Ubuntu
+    - name: Ensure MySQL service is started and enabled (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      systemd:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Display MySQL version
+      command: mysql --version
+      register: mysql_version
+      changed_when: false
+
+    - name: Print MySQL version
+      debug:
+        var: mysql_version.stdout

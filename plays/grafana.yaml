@@ -1,0 +1,125 @@
+---
+- name: Install Grafana
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    grafana_version: "11.2.2"
+    grafana_deb_url: "https://dl.grafana.com/enterprise/release/grafana-enterprise_{{ grafana_version }}_amd64.deb"
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+      
+    # Ubuntu-specific tasks        
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name:
+          - adduser
+          - libfontconfig1
+          - wget
+        state: present
+
+    - name: Download Grafana deb package (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      get_url:
+        url: "{{ grafana_deb_url }}"
+        dest: "/tmp/grafana-enterprise_{{ grafana_version }}_amd64.deb"
+
+    - name: Install Grafana package (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        deb: "/tmp/grafana-enterprise_{{ grafana_version }}_amd64.deb"
+        state: present
+
+    # RHEL-specific tasks
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager repos --enable rhel-{{ ansible_distribution_major_version }}-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+
+    - name: Download Grafana GPG key (RHEL)
+      when: ansible_os_family == 'RedHat'
+      get_url:
+        url: https://rpm.grafana.com/gpg.key
+        dest: /tmp/gpg.key
+
+    - name: Import Grafana GPG key (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        rpm --import /tmp/gpg.key
+
+    - name: Create Grafana repository file (RHEL)
+      when: ansible_os_family == 'RedHat'
+      copy:
+        content: |
+          [grafana]
+          name=grafana
+          baseurl=https://rpm.grafana.com
+          repo_gpgcheck=1
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://rpm.grafana.com/gpg.key
+          sslverify=1
+          sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+        dest: /etc/yum.repos.d/grafana.repo
+        mode: '0644'
+
+    - name: Install Grafana (RHEL)
+      when: ansible_os_family == 'RedHat'
+      shell: |
+        yum install -y grafana --nogpgcheck
+
+    # Common tasks
+    - name: Ensure Grafana service is started and enabled
+      systemd:
+        name: grafana-server
+        state: started
+        enabled: yes
+
+    - name: Clean up downloaded files
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - "/tmp/grafana-enterprise_{{ grafana_version }}_amd64.deb"
+        - "/tmp/gpg.key"
+      ignore_errors: yes
+
+    - name: Print Grafana installation complete message
+      debug:
+        msg: "Grafana has been installed successfully. You can access it at https://{{ morpheus['server']['internalIp'] }}:3000"

@@ -1,0 +1,106 @@
+---
+- name: Setup Frontend Node
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    nodejs_version: "18.x"
+    app_user: "{{ ansible_user }}"
+    frontend_dir: "/home/{{ app_user }}/frontend"
+    backend_ip: "{{ morpheus['instance']['containers'] | selectattr('hostname', 'equalto', 'mern-backend') | map(attribute='externalIp') | first }}"
+
+  tasks:
+    - name: Add NodeSource repository
+      shell: |
+        curl -fsSL https://deb.nodesource.com/setup_{{ nodejs_version }} | bash -
+    
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+
+    - name: Create frontend directory
+      file:
+        path: "{{ frontend_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+
+    - name: Initialize React frontend
+      command: npx create-react-app . --use-npm
+      args:
+        chdir: "{{ frontend_dir }}"
+        creates: "{{ frontend_dir }}/package.json"
+      become: yes
+      become_user: "{{ app_user }}"
+      environment:
+        CI: "true"
+
+    - name: Install additional frontend dependencies
+      command: npm install {{ item }}
+      args:
+        chdir: "{{ frontend_dir }}"
+      with_items:
+        - web-vitals
+        - "@babel/plugin-proposal-private-property-in-object"
+        - axios  # for API calls to backend
+      become: yes
+      become_user: "{{ app_user }}"
+
+    - name: Build React app
+      command: npm run build
+      args:
+        chdir: "{{ frontend_dir }}"
+      become: yes
+      become_user: "{{ app_user }}"
+      environment:
+        CI: "true"
+
+    - name: Install and configure NGINX
+      block:
+        - name: Install NGINX
+          apt:
+            name: nginx
+            state: present
+
+        - name: Create NGINX configuration
+          copy:
+            content: |
+              server {
+                  listen 80;
+                  server_name localhost;
+                  root {{ frontend_dir }}/build;
+                  
+                  location / {
+                      try_files $uri $uri/ /index.html;
+                  }
+                  location /api {
+                      proxy_pass http://{{ backend_ip }}:3000;
+                      proxy_http_version 1.1;
+                      proxy_set_header Upgrade $http_upgrade;
+                      proxy_set_header Connection 'upgrade';
+                      proxy_set_header Host $host;
+                      proxy_cache_bypass $http_upgrade;
+                  }
+              }
+            dest: /etc/nginx/sites-available/frontend
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Enable frontend site
+          file:
+            src: /etc/nginx/sites-available/frontend
+            dest: /etc/nginx/sites-enabled/frontend
+            state: link
+
+        - name: Remove default site
+          file:
+            path: /etc/nginx/sites-enabled/default
+            state: absent
+
+        - name: Reload NGINX
+          systemd:
+            name: nginx
+            state: reloaded

@@ -1,0 +1,141 @@
+---
+- name: Install InfluxDB
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
+    db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
+    db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
+    db_vars_provided: false
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+
+  tasks:
+    # DNS configuration for both Ubuntu and RHEL
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Configure resolv.conf with Google DNS (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    # Clear proxy settings
+    - name: Clear apt proxy settings (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+    
+    - name: Clear yum proxy settings (RHEL)
+      when: ansible_os_family == "RedHat"
+      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+      
+    - name: Ensure Ansible remote tmp directory exists and is writable
+      file:
+        path: "{{ ansible_remote_tmp }}"
+        state: directory
+        mode: '1777'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      become: true
+
+    - name: Check if database variables are provided
+      set_fact:
+        db_vars_provided: true
+      when: 
+        - db_password != ''
+        - db_user != ''
+        - db_name != ''
+
+    # Ubuntu-specific tasks
+    - name: Download InfluxData GPG key (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        curl https://repos.influxdata.com/influxdata-archive_compat.key -o /tmp/influxdata-archive_compat.key
+      args:
+        creates: /tmp/influxdata-archive_compat.key
+
+    - name: Install GPG key (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        cat /tmp/influxdata-archive_compat.key | gpg --dearmor > /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg
+
+    - name: Add InfluxDB repository (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: |
+        echo "deb [signed-by=/etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg] https://repos.influxdata.com/debian stable main" > /etc/apt/sources.list.d/influxdata.list
+
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        update_cache: yes
+
+    - name: Install InfluxDB (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
+        name: 
+          - influxdb2
+          - influxdb2-cli
+        state: present
+
+    # RHEL-specific tasks
+    - name: Register and subscribe RHEL system
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
+      register: subscription_result
+      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
+      changed_when: subscription_result.rc == 0
+
+    - name: Enable required RHEL repositories
+      when: ansible_os_family == 'RedHat'
+      command: subscription-manager repos --enable rhel-{{ ansible_distribution_major_version }}-for-x86_64-appstream-rpms
+      register: repo_result
+      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
+      changed_when: repo_result.rc == 0
+
+    - name: Add InfluxDB repository (RHEL)
+      when: ansible_os_family == 'RedHat'
+      yum_repository:
+        name: influxdb
+        description: InfluxDB Repository
+        baseurl: https://repos.influxdata.com/rhel/$releasever/$basearch/stable
+        gpgcheck: yes
+        enabled: yes
+        gpgkey: https://repos.influxdata.com/influxdata-archive_compat.key
+
+    - name: Install InfluxDB packages (RHEL)
+      when: ansible_os_family == 'RedHat'
+      yum:
+        name: 
+          - influxdb2
+          - influxdb2-cli
+        state: present
+        update_cache: yes
+
+    # Common tasks for both distributions
+    - name: Enable and start InfluxDB service
+      systemd:
+        name: influxdb
+        enabled: yes
+        state: started
+
+    - name: Wait for InfluxDB service to be ready
+      wait_for:
+        port: 8086
+        timeout: 30
+
+    - name: Set up initial InfluxDB configuration
+      command: >
+        /usr/bin/influx setup 
+        --org my-org 
+        --bucket "{{ db_name }}" 
+        --username "{{ db_user }}" 
+        --password "{{ db_password }}"
+        --force
+      environment:
+        PATH: "/usr/bin:/usr/local/bin:/bin"
+      when: db_vars_provided
+      register: influx_setup
+      changed_when: influx_setup.rc == 0
+      failed_when: influx_setup.rc != 0

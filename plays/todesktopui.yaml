@@ -1,0 +1,56 @@
+---
+- name: Install Ubuntu Desktop Environment
+  hosts: all
+  become: true
+  tasks:
+    - name: Configure resolv.conf with Google DNS
+      when: ansible_distribution == "Ubuntu"
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+        
+    - name: Configure resolv.conf with Google DNS
+      when: ansible_distribution == "Ubuntu"
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+
+    - name: Kill all apt and dpkg processes
+      shell: |
+        pkill -f apt
+        pkill -f dpkg
+      ignore_errors: yes
+
+    - name: Remove all lock files and temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /var/lib/dpkg/lock-frontend
+        - /var/lib/dpkg/lock
+        - /var/cache/debconf/config.dat.lock
+        - /var/cache/debconf/passwords.dat.lock
+        - /var/cache/debconf/templates.dat.lock
+        - /var/lib/apt/lists/lock
+        - /var/lib/apt/lists/partial
+      ignore_errors: yes
+
+    - name: Fix dpkg
+      shell: |
+        rm -f /var/lib/dpkg/updates/*
+        rm -f /var/lib/dpkg/status-old
+        dpkg --clear-avail
+        dpkg --configure --pending
+      ignore_errors: yes
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        force_apt_get: yes
+        cache_valid_time: 3600
+
+    - name: Install Ubuntu Desktop
+      apt:
+        name: ubuntu-desktop
+        state: present
+        force_apt_get: yes
+
+    - name: Reboot the system
+      reboot:
+        reboot_timeout: 600

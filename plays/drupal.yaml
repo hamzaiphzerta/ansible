@@ -1,0 +1,216 @@
+---
+- name: Install Basic Drupal on Ubuntu
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    php_version: "8.1"
+    drupal_version: "10.4.2"
+    web_root: "/var/www/html"
+    mysql_root_password: "{{ lookup('cypher','secret=secret/mysqlpw') }}"
+    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+    
+  tasks:
+    # Basic system setup
+    - name: Configure resolv.conf with Google DNS
+      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+    
+    - name: Clear apt proxy settings
+      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # Install minimum required packages
+    - name: Install essential packages
+      apt:
+        name:
+          - apache2
+          - mysql-server
+          - php{{ php_version }}
+          - php{{ php_version }}-mysql
+          - php{{ php_version }}-gd
+          - php{{ php_version }}-xml
+          - php{{ php_version }}-mbstring
+          - php{{ php_version }}-curl
+          - php{{ php_version }}-zip
+          - php{{ php_version }}-intl
+          - unzip
+          - wget
+        state: present
+
+    # Configure MySQL with basic settings
+    - name: Start MySQL
+      systemd:
+        name: mysql
+        state: started
+        enabled: yes
+
+    # Set MySQL root password
+    - name: Set MySQL root password
+      shell: |
+        mysql --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED WITH 'mysql_native_password' BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+      ignore_errors: true
+
+    # Create database and user
+    - name: Create Drupal database and user
+      shell: |
+        mysql -u root -p{{ mysql_root_password }} -e "
+        CREATE DATABASE IF NOT EXISTS drupal;
+        CREATE USER IF NOT EXISTS 'drupal'@'localhost' IDENTIFIED BY 'ACSCloud!2021!';
+        GRANT ALL PRIVILEGES ON drupal.* TO 'drupal'@'localhost';
+        FLUSH PRIVILEGES;"
+      ignore_errors: true
+
+    # Clear web root and prepare for Drupal
+    - name: Remove default web content
+      file:
+        path: "{{ web_root }}"
+        state: absent
+
+    - name: Create fresh web root
+      file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    # Install Drupal
+    - name: Download Drupal
+      get_url:
+        url: "https://ftp.drupal.org/files/projects/drupal-{{ drupal_version }}.tar.gz"
+        dest: "/tmp/drupal.tar.gz"
+
+    - name: Extract Drupal
+      unarchive:
+        src: "/tmp/drupal.tar.gz"
+        dest: "/tmp"
+        remote_src: yes
+
+    - name: Move Drupal files to web root
+      shell: "cp -r /tmp/drupal-{{ drupal_version }}/* {{ web_root }}/"
+
+    # Apache Configuration Section
+    - name: Enable Apache modules
+      shell: |
+        a2enmod rewrite
+        a2enmod env
+        a2enmod dir
+        a2enmod mime
+      register: apache_mods
+
+    # PHP configuration
+    - name: Configure PHP
+      lineinfile:
+        path: /etc/php/{{ php_version }}/apache2/php.ini
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      with_items:
+        - { regexp: '^memory_limit =', line: 'memory_limit = 256M' }
+        - { regexp: '^upload_max_filesize =', line: 'upload_max_filesize = 32M' }
+        - { regexp: '^post_max_size =', line: 'post_max_size = 32M' }
+        - { regexp: '^max_execution_time =', line: 'max_execution_time = 300' }
+
+    - name: Set proper permissions
+      shell: |
+        chown -R www-data:www-data {{ web_root }}
+        find {{ web_root }} -type d -exec chmod 755 {} \;
+        find {{ web_root }} -type f -exec chmod 644 {} \;
+
+    - name: Configure Apache VirtualHost for Drupal
+      copy:
+        content: |
+          <VirtualHost *:80>
+            ServerAdmin webmaster@localhost
+            DocumentRoot {{ web_root }}
+            
+            <Directory {{ web_root }}>
+              Options FollowSymLinks
+              AllowOverride All
+              Require all granted
+            </Directory>
+            
+            ErrorLog ${APACHE_LOG_DIR}/error.log
+            CustomLog ${APACHE_LOG_DIR}/access.log combined
+          </VirtualHost>
+        dest: /etc/apache2/sites-available/000-default.conf
+
+    - name: Configure Apache for Drupal
+      copy:
+        content: |
+          <Directory {{ web_root }}>
+              Options FollowSymLinks
+              AllowOverride All
+              Require all granted
+          </Directory>
+        dest: /etc/apache2/conf-available/drupal.conf
+
+    - name: Enable Drupal configuration
+      shell: a2enconf drupal
+
+    - name: Create .htaccess file
+      copy:
+        content: |
+          RewriteEngine On
+          RewriteBase /
+          RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+          RewriteCond %{REQUEST_FILENAME} !-f
+          RewriteCond %{REQUEST_FILENAME} !-d
+          RewriteRule ^(.*)$ index.php [L]
+        dest: "{{ web_root }}/.htaccess"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Create settings.php from default
+      shell: |
+        cp {{ web_root }}/sites/default/default.settings.php {{ web_root }}/sites/default/settings.php
+        chown www-data:www-data {{ web_root }}/sites/default/settings.php
+        chmod 644 {{ web_root }}/sites/default/settings.php
+
+    - name: Create and set permissions for files directory
+      shell: |
+        mkdir -p {{ web_root }}/sites/default/files
+        chown -R www-data:www-data {{ web_root }}/sites/default/files
+        chmod 755 {{ web_root }}/sites/default/files
+
+    - name: Verify Apache configuration
+      shell: apache2ctl -t
+      register: apache_verify
+
+    - name: Restart Apache
+      service:
+        name: apache2
+        state: restarted
+        enabled: yes
+      when: apache_verify.rc == 0
+
+    # Add debugging tasks
+    - name: Check Apache error log
+      shell: "tail -n 50 /var/log/apache2/error.log"
+      register: apache_error_log
+
+    - name: Display Apache error log
+      debug:
+        var: apache_error_log.stdout_lines
+
+    - name: Display MySQL version
+      command: mysql --version
+      register: mysql_version
+      changed_when: false
+
+    - name: Display completion message
+      debug:
+        msg: |
+          Drupal installation ready!
+          Visit http://{{ morpheus['server']['internalIp'] }} to complete setup
+          
+          Database details:
+          Name: drupal
+          User: drupal
+          Password: ACSCloud!2021!
+          
+          MySQL version: {{ mysql_version.stdout }}
