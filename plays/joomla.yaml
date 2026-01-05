@@ -1,24 +1,30 @@
-
 ---
 - name: Install Basic Joomla on Ubuntu
   hosts: all
   become: true
   gather_facts: true
   
-  # AJOUTÉ: Supprime le warning Python
   vars:
-    PYTHONWARNINGS: "ignore:urllib3"
     php_version: "8.1"
     joomla_version: "5-2-3"
     web_root: "/var/www/html"
     mysql_root_password: "{{ lookup('cypher','secret=secret/mysqlpw') }}"
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
-    ansible_python_interpreter: /usr/bin/python3
 
   tasks:
-    # SUPPRIME cette tâche - elle ne sert à rien pour le warning
-    # - name: Fix Python dependencies warning
-    #   shell: pip3 install "urllib3<2.0" "chardet<4.0.0"
+    # AJOUTÉ: Tâche pour supprimer le warning Python
+    - name: Suppress Python warnings on Ansible controller
+      delegate_to: localhost
+      run_once: true
+      connection: local
+      shell: |
+        python3 -c "
+        import warnings
+        warnings.filterwarnings('ignore', category=UserWarning)
+        warnings.filterwarnings('ignore', message='urllib3')
+        warnings.filterwarnings('ignore', message='chardet')
+        print('Python warnings suppressed')
+        "
 
     # Basic system setup
     - name: Configure resolv.conf with Google DNS
