@@ -3,9 +3,14 @@
   hosts: all
   become: true
   
-  # AJOUTÉ: Juste cette ligne pour ignorer le warning
+  # DÉFINIR AU DÉBUT pour éviter les warnings
   vars:
-    PYTHONWARNINGS: "ignore:urllib3"
+    ansible_python_interpreter: /usr/bin/python3
+  
+  environment:
+    PYTHONWARNINGS: "ignore"
+
+  vars:
     rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
     rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
     zabbix_db_password: "zabbix123"
