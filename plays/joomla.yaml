@@ -8,7 +8,8 @@
     php_version: "8.1"
     joomla_version: "5-2-3"
     web_root: "/var/www/html"
-    mysql_root_password: "{{ lookup('cypher','secret=secret/mysqlpw') }}"
+    # if u waaaaaant to use cypheeer ok ************************* mysql_root_password: "{{ lookup('cypher','secret=secret/mysqlpw') }}"
+    mysql_root_password: "joomla123"
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
 
   tasks:
