@@ -100,6 +100,14 @@
       changed_when: schema_import.rc == 0
       failed_when: schema_import.rc != 0
 
+    # ✅ AJOUT: Donner tous les privilèges à l'utilisateur zabbix
+    - name: Grant all privileges to zabbix user on database
+      become_user: postgres
+      shell: |
+        psql -d zabbix -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO zabbix;"
+        psql -d zabbix -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO zabbix;"
+      ignore_errors: true
+
     # --- AJOUT: Attendre que PostgreSQL soit prêt ---
     - name: Wait for PostgreSQL to be ready
       shell: |
