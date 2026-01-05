@@ -1,3 +1,5 @@
+
+
 ---
 - name: Install Basic Joomla on Ubuntu
   hosts: all
@@ -9,8 +11,13 @@
     web_root: "/var/www/html"
     mysql_root_password: "{{ lookup('cypher','secret=secret/mysqlpw') }}"
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+    ansible_python_interpreter: /usr/bin/python3  # AJOUTÉ ICI
 
   tasks:
+    # AJOUTER CETTE TÂCHE AU DÉBUT pour fixer l'erreur Python
+    - name: Fix Python dependencies warning
+      shell: pip3 install "urllib3<2.0" "chardet<4.0.0"
+
     # Basic system setup
     - name: Configure resolv.conf with Google DNS
       shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
@@ -23,6 +30,7 @@
         update_cache: yes
         cache_valid_time: 3600
 
+    # [Tout le reste de ton playbook reste EXACTEMENT pareil...]
     # Install minimum required packages
     - name: Install essential packages
       apt:
