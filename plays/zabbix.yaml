@@ -1,3 +1,6 @@
+
+
+
 ---
 - name: Install Zabbix on Ubuntu 22.04
   hosts: all
@@ -24,7 +27,7 @@
       apt:
         update_cache: yes
 
-    # --- Install PostgreSQL --- AJOUTÉ
+    # --- Install PostgreSQL ---
     - name: Install PostgreSQL
       apt:
         name: postgresql
@@ -79,19 +82,17 @@
         name: postgresql
         state: restarted
 
+    # CORRECTION: Créer l'utilisateur d'abord
     - name: Create Zabbix database user
       become_user: postgres
       shell: |
-        psql -c "CREATE DATABASE zabbix OWNER zabbix;" 2>/dev/null || true
-        
+        psql -c "CREATE USER zabbix WITH PASSWORD '{{ zabbix_db_password }}';" 2>/dev/null || true
+
+    # CORRECTION: Créer la base simplement
     - name: Create Zabbix database
       become_user: postgres
       shell: |
-        psql -c "DO \$\$ BEGIN
-          IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'zabbix') THEN
-            CREATE DATABASE zabbix OWNER zabbix;
-          END IF;
-        END \$\$;"
+        psql -c "CREATE DATABASE zabbix OWNER zabbix;" 2>/dev/null || true
 
     - name: Import Zabbix schema
       become_user: postgres
@@ -175,5 +176,3 @@
           - "Default credentials:"
           - "Username: Admin"
           - "Password: zabbix"
-
-
