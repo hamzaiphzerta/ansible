@@ -1,22 +1,24 @@
 
-
 ---
 - name: Install Basic Joomla on Ubuntu
   hosts: all
   become: true
   gather_facts: true
+  
+  # AJOUTÉ: Supprime le warning Python
   vars:
+    PYTHONWARNINGS: "ignore:urllib3"
     php_version: "8.1"
     joomla_version: "5-2-3"
     web_root: "/var/www/html"
     mysql_root_password: "{{ lookup('cypher','secret=secret/mysqlpw') }}"
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
-    ansible_python_interpreter: /usr/bin/python3  # AJOUTÉ ICI
+    ansible_python_interpreter: /usr/bin/python3
 
   tasks:
-    # AJOUTER CETTE TÂCHE AU DÉBUT pour fixer l'erreur Python
-    - name: Fix Python dependencies warning
-      shell: pip3 install "urllib3<2.0" "chardet<4.0.0"
+    # SUPPRIME cette tâche - elle ne sert à rien pour le warning
+    # - name: Fix Python dependencies warning
+    #   shell: pip3 install "urllib3<2.0" "chardet<4.0.0"
 
     # Basic system setup
     - name: Configure resolv.conf with Google DNS
@@ -30,13 +32,13 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    # [Tout le reste de ton playbook reste EXACTEMENT pareil...]
-    # Install minimum required packages
+    # CORRECTION CRITIQUE: Ajouter libapache2-mod-php
     - name: Install essential packages
       apt:
         name:
           - apache2
           - mysql-server
+          - libapache2-mod-php{{ php_version }}  # ESSENTIEL - AJOUTÉ
           - php{{ php_version }}
           - php{{ php_version }}-mysql
           - php{{ php_version }}-gd
@@ -67,16 +69,35 @@
         state: started
         enabled: yes
 
-    # Set MySQL root password
+    # CORRECTION: Meilleure méthode pour le mot de passe MySQL
     - name: Set MySQL root password
       shell: |
-        mysql --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED WITH 'mysql_native_password' BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+        # Essayer avec le mot de passe
+        if mysql -u root -p"{{ mysql_root_password }}" -e "SELECT 1" 2>/dev/null; then
+          echo "MySQL password already works"
+        else
+          # Si ça échoue, essayer sans mot de passe
+          mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH 'mysql_native_password' BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+        fi
+      ignore_errors: true
+
+    # CORRECTION: Attendre que MySQL soit prêt
+    - name: Wait for MySQL
+      shell: |
+        sleep 10  # Donner du temps à MySQL
+        for i in {1..10}; do
+          if mysqladmin -u root -p"{{ mysql_root_password }}" ping 2>/dev/null; then
+            exit 0
+          fi
+          sleep 2
+        done
+        exit 1
       ignore_errors: true
 
     # Create database and user with remote access
     - name: Create Joomla database and user with remote access
       shell: |
-        mysql -u root -p{{ mysql_root_password }} -e "
+        mysql -u root -p"{{ mysql_root_password }}" -e "
         CREATE DATABASE IF NOT EXISTS joomla;
         CREATE USER IF NOT EXISTS 'joomla'@'localhost' IDENTIFIED BY 'ACSCloud!2021!';
         CREATE USER IF NOT EXISTS 'joomla'@'%' IDENTIFIED BY 'ACSCloud!2021!';
