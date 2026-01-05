@@ -91,7 +91,7 @@
       shell: |
         psql -c "CREATE DATABASE zabbix OWNER zabbix;" 2>/dev/null || true
 
-    # CORRECTION: Enlève le "args: warn: false"
+    # Importer le schéma
     - name: Import Zabbix schema
       become_user: postgres
       shell: |
@@ -100,6 +100,19 @@
       changed_when: schema_import.rc == 0
       failed_when: schema_import.rc != 0
 
+    # --- AJOUT: Attendre que PostgreSQL soit prêt ---
+    - name: Wait for PostgreSQL to be ready
+      shell: |
+        sleep 3
+        for i in {1..10}; do
+          if pg_isready -h localhost; then
+            exit 0
+          fi
+          sleep 2
+        done
+        exit 1
+      ignore_errors: true
+
     # --- Configure Zabbix ---
     - name: Configure Zabbix server DB connection
       lineinfile:
@@ -107,10 +120,22 @@
         regexp: "{{ item.regexp }}"
         line: "{{ item.line }}"
       loop:
-        - { regexp: '^DBHost=', line: 'DBHost=localhost' }
-        - { regexp: '^DBName=', line: 'DBName=zabbix' }
-        - { regexp: '^DBUser=', line: 'DBUser=zabbix' }
-        - { regexp: '^DBPassword=', line: 'DBPassword={{ zabbix_db_password }}' }
+        - { regexp: '^#?DBHost=', line: 'DBHost=localhost' }
+        - { regexp: '^#?DBName=', line: 'DBName=zabbix' }
+        - { regexp: '^#?DBUser=', line: 'DBUser=zabbix' }
+        - { regexp: '^#?DBPassword=', line: 'DBPassword={{ zabbix_db_password }}' }
+
+    # --- AJOUT: Vérifier la configuration Zabbix ---
+    - name: Test Zabbix server configuration
+      shell: |
+        sudo -u zabbix /usr/sbin/zabbix_server -c /etc/zabbix/zabbix_server.conf -R config_cache_reload
+      register: zabbix_test
+      changed_when: false
+      ignore_errors: true
+
+    - name: Show Zabbix config test result
+      debug:
+        var: zabbix_test.stdout_lines
 
     - name: Set PHP timezone
       lineinfile:
@@ -138,15 +163,43 @@
               </IfModule>
           </Directory>
 
-    - name: Start Zabbix services
+    # --- MODIFIÉ: Démarrer les services avec retry ---
+    - name: Start Apache first
       systemd:
-        name: "{{ item }}"
-        state: restarted
+        name: apache2
+        state: started
         enabled: yes
-      loop:
-        - zabbix-server
-        - zabbix-agent
-        - apache2
+
+    - name: Start Zabbix agent
+      systemd:
+        name: zabbix-agent
+        state: started
+        enabled: yes
+
+    - name: Start Zabbix server with retry
+      shell: |
+        systemctl start zabbix-server || (sleep 5 && systemctl start zabbix-server)
+      ignore_errors: true
+
+    - name: Enable Zabbix server
+      systemd:
+        name: zabbix-server
+        state: started
+        enabled: yes
+
+    # --- AJOUT: Vérifier l'état des services ---
+    - name: Check service status
+      shell: |
+        echo "=== Service Status ==="
+        systemctl status zabbix-server --no-pager | head -20 || true
+        echo "=== Zabbix Server Logs ==="
+        tail -10 /var/log/zabbix/zabbix_server.log 2>/dev/null || echo "No logs yet"
+      register: service_status
+      changed_when: false
+
+    - name: Show service status
+      debug:
+        var: service_status.stdout_lines
 
     - name: Wait for Zabbix web interface
       uri:
@@ -155,8 +208,8 @@
         timeout: 300
       register: result
       until: result.status == 200
-      retries: 60
-      delay: 5
+      retries: 30
+      delay: 10
       ignore_errors: yes
 
     - name: Clean up downloaded files
@@ -167,8 +220,9 @@
     - name: Print installation complete message
       debug:
         msg:
-          - "Zabbix has been installed successfully."
+          - "Zabbix installation attempted."
           - "Access Zabbix at http://localhost/zabbix"
           - "Default credentials:"
-          - "Username: Admin"
-          - "Password: zabbix"
+          - "   Username: Admin"
+          - " Password: zabbix"
+
