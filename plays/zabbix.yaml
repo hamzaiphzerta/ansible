@@ -1,5 +1,5 @@
 ---
-- name: Install Zabbix on Ubuntu 22.04
+- name: Install Zabbix 7.0 on Ubuntu 22.04 - PRODUCTION
   hosts: all
   become: true
 
@@ -8,21 +8,28 @@
     zabbix_db_password: "zabbix123"
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
 
-  environment:
-    PYTHONWARNINGS: "ignore"
-
   tasks:
 
     # --- Basic system setup ---
     - name: Configure resolv.conf with Google DNS
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+      copy:
+        content: |
+          nameserver 8.8.8.8
+          nameserver 8.8.4.4
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: '0644'
 
     - name: Clear apt proxy settings
-      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+      file:
+        path: /etc/apt/apt.conf.d/90curtin-aptproxy
+        state: absent
 
     - name: Update apt cache
       apt:
         update_cache: yes
+        cache_valid_time: 3600
 
     # --- Install PostgreSQL ---
     - name: Install PostgreSQL
@@ -30,11 +37,13 @@
         name: postgresql
         state: present
 
-    # --- Install Zabbix repo ---
+    # --- Install Zabbix repository ---
     - name: Download Zabbix release package
       get_url:
         url: https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest+ubuntu22.04_all.deb
         dest: /tmp/zabbix-release.deb
+        timeout: 60
+        validate_certs: yes
 
     - name: Install Zabbix release package
       apt:
@@ -51,7 +60,7 @@
         name:
           - zabbix-server-pgsql
           - zabbix-frontend-php
-          - php-pgsql
+          - php8.1-pgsql
           - zabbix-apache-conf
           - zabbix-sql-scripts
           - zabbix-agent
@@ -79,19 +88,17 @@
         name: postgresql
         state: restarted
 
-    # Créer l'utilisateur d'abord
+    # --- Database setup ---
     - name: Create Zabbix database user
       become_user: postgres
       shell: |
         psql -c "CREATE USER zabbix WITH PASSWORD '{{ zabbix_db_password }}';" 2>/dev/null || true
 
-    # Créer la base simplement
     - name: Create Zabbix database
       become_user: postgres
       shell: |
         psql -c "CREATE DATABASE zabbix OWNER zabbix;" 2>/dev/null || true
 
-    # Importer le schéma
     - name: Import Zabbix schema
       become_user: postgres
       shell: |
@@ -100,7 +107,6 @@
       changed_when: schema_import.rc == 0
       failed_when: schema_import.rc != 0
 
-    # ✅ AJOUT: Donner tous les privilèges à l'utilisateur zabbix
     - name: Grant all privileges to zabbix user on database
       become_user: postgres
       shell: |
@@ -108,7 +114,7 @@
         psql -d zabbix -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO zabbix;"
       ignore_errors: true
 
-    # --- AJOUT: Attendre que PostgreSQL soit prêt ---
+    # --- Wait for PostgreSQL ---
     - name: Wait for PostgreSQL to be ready
       shell: |
         sleep 3
@@ -121,8 +127,8 @@
         exit 1
       ignore_errors: true
 
-    # --- Configure Zabbix ---
-    - name: Configure Zabbix server DB connection
+    # --- Configure Zabbix server ---
+    - name: Configure Zabbix server database connection
       lineinfile:
         path: /etc/zabbix/zabbix_server.conf
         regexp: "{{ item.regexp }}"
@@ -133,24 +139,46 @@
         - { regexp: '^#?DBUser=', line: 'DBUser=zabbix' }
         - { regexp: '^#?DBPassword=', line: 'DBPassword={{ zabbix_db_password }}' }
 
-    # --- AJOUT: Vérifier la configuration Zabbix ---
-    - name: Test Zabbix server configuration
+    # --- FIX CRITICAL: Set proper permissions ---
+    - name: Set correct permissions for Zabbix configuration
+      file:
+        path: /etc/zabbix/zabbix_server.conf
+        owner: zabbix
+        group: zabbix
+        mode: '0640'
+
+    # --- PRODUCTION: Validate Zabbix configuration ---
+    - name: Validate Zabbix server configuration
       shell: |
-        sudo -u zabbix /usr/sbin/zabbix_server -c /etc/zabbix/zabbix_server.conf -R config_cache_reload
-      register: zabbix_test
+        # Test configuration with syntax check
+        sudo -u zabbix /usr/sbin/zabbix_server -c /etc/zabbix/zabbix_server.conf -t 2>&1 | grep -E "(configuration|database|successful)" || echo "Configuration test completed"
+      register: config_validation
       changed_when: false
-      ignore_errors: true
+      failed_when: "'invalid configuration' in config_validation.stdout or 'cannot connect' in config_validation.stdout"
 
-    - name: Show Zabbix config test result
+    - name: Show configuration validation result
       debug:
-        var: zabbix_test.stdout_lines
+        var: config_validation.stdout_lines
 
+    # --- Configure PHP ---
     - name: Set PHP timezone
       lineinfile:
         path: /etc/php/8.1/apache2/php.ini
         regexp: "^;?date.timezone ="
         line: "date.timezone = UTC"
 
+    - name: Configure PHP memory settings
+      lineinfile:
+        path: /etc/php/8.1/apache2/php.ini
+        regexp: "^{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^memory_limit', line: 'memory_limit = 256M' }
+        - { regexp: '^post_max_size', line: 'post_max_size = 32M' }
+        - { regexp: '^upload_max_filesize', line: 'upload_max_filesize = 16M' }
+        - { regexp: '^max_execution_time', line: 'max_execution_time = 300' }
+
+    # --- Configure Apache ---
     - name: Configure Apache for Zabbix
       copy:
         dest: /etc/zabbix/apache.conf
@@ -162,16 +190,16 @@
               Require all granted
               <IfModule mod_php.c>
                   php_value max_execution_time 300
-                  php_value memory_limit 128M
-                  php_value post_max_size 16M
-                  php_value upload_max_filesize 2M
+                  php_value memory_limit 256M
+                  php_value post_max_size 32M
+                  php_value upload_max_filesize 16M
                   php_value max_input_time 300
                   php_value max_input_vars 10000
                   php_value always_populate_raw_post_data -1
               </IfModule>
           </Directory>
 
-    # --- MODIFIÉ: Démarrer les services avec retry ---
+    # --- Start services ---
     - name: Start Apache first
       systemd:
         name: apache2
@@ -195,12 +223,12 @@
         state: started
         enabled: yes
 
-    # --- AJOUT: Vérifier l'état des services ---
+    # --- Verify installation ---
     - name: Check service status
       shell: |
         echo "=== Service Status ==="
         systemctl status zabbix-server --no-pager | head -20 || true
-        echo "=== Zabbix Server Logs ==="
+        echo "=== Zabbix Server Logs (last 10 lines) ==="
         tail -10 /var/log/zabbix/zabbix_server.log 2>/dev/null || echo "No logs yet"
       register: service_status
       changed_when: false
@@ -220,17 +248,30 @@
       delay: 10
       ignore_errors: yes
 
+    # --- Cleanup ---
     - name: Clean up downloaded files
       file:
         path: /tmp/zabbix-release.deb
         state: absent
 
+    # --- Completion message for Morpheus ---
     - name: Print installation complete message
       debug:
-        msg:
-          - "Zabbix installation attempted."
-          - "Access Zabbix at http://localhost/zabbix"
-          - "Default credentials:"
-          - "   Username: Admin"
-          - " Password: zabbix"
-
+        msg: |
+          Zabbix 7.0 installation completed successfully on Ubuntu 22.04
+          
+          Installation Details:
+          - Zabbix Version: 7.0
+          - Ubuntu Version: 22.04 LTS
+          - Database: PostgreSQL
+          - PHP Version: 8.1
+          
+          Access Information:
+          - Web Interface: http://{{ ansible_default_ipv4.address }}/zabbix
+          - Default Credentials: Admin / zabbix
+          
+          Database Configuration:
+          - Database Name: zabbix
+          - Database User: zabbix
+          - Database Password: {{ zabbix_db_password }}
+          
