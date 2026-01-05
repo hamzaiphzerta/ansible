@@ -1,3 +1,4 @@
+---
 - name: Install Zabbix on Ubuntu and RHEL
   hosts: all
   become: true
@@ -7,16 +8,14 @@
     zabbix_db_password: "zabbix123"
     postgres_password: "{{ hostvars[inventory_hostname].get('morpheus', {}).get('customOptions', {}).get('dbCustomPassword', 'postgres123') }}"
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
-    ansible_python_interpreter: /usr/bin/python3   # fixes ???
-
-  pre_tasks:
-    - name: Fix urllib3 / chardet versions to suppress RequestsDependencyWarning
-      pip:
-        name:
-          - "urllib3<2.0,>=1.26"
-          - "chardet<5,>=3.0"
+    ansible_python_interpreter: /usr/bin/python3  # Ajouté
 
   tasks:
+    # fix??
+    - name: Fix Python dependencies warning
+      shell: |
+        python3 -c "import sys; sys.path.remove(''); import pip; pip.main(['install', '--upgrade', 'urllib3==1.26.6', 'chardet==3.0.4'])" 2>/dev/null || pip3 install "urllib3<2.0" "chardet<4.0.0"
+    
     # DNS configuration for both Ubuntu and RHEL
     - name: Configure resolv.conf with Google DNS (Ubuntu)
       when: ansible_distribution == "Ubuntu"
@@ -98,7 +97,7 @@
         state: present
       register: zabbix_install_rhel
 
-    # PostgreSQL database setup
+    # PostgreSQL database setup for Zabbix
     - name: Configure PostgreSQL authentication (RHEL)
       lineinfile:
         path: /var/lib/pgsql/data/pg_hba.conf
@@ -132,6 +131,7 @@
         name: postgresql
         state: restarted
 
+    # PostgreSQL database setup for Zabbix
     - name: Create Zabbix database user
       become: yes
       become_user: postgres
@@ -182,6 +182,7 @@
         - { regexp: '^DBUser=', line: 'DBUser=zabbix' }
         - { regexp: '^DBPassword=', line: 'DBPassword={{ zabbix_db_password }}' }
 
+    # Configure PHP for Zabbix frontend
     - name: Set PHP timezone (Ubuntu)
       lineinfile:
         path: /etc/php/8.1/apache2/php.ini
@@ -196,15 +197,18 @@
         line: "date.timezone = UTC"
       when: ansible_os_family == "RedHat"
 
+    # Configure Apache for Zabbix
     - name: Configure Apache for Zabbix
       copy:
         dest: /etc/zabbix/apache.conf
         content: |
           Alias /zabbix /usr/share/zabbix
+          
           <Directory "/usr/share/zabbix">
               Options FollowSymLinks
               AllowOverride None
               Require all granted
+              
               <IfModule mod_php.c>
                   php_value max_execution_time 300
                   php_value memory_limit 128M
@@ -216,6 +220,7 @@
               </IfModule>
           </Directory>
 
+    # Start services for Ubuntu
     - name: Start Zabbix services (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       systemd:
@@ -227,6 +232,7 @@
         - zabbix-agent
         - apache2
 
+    # Start services for RHEL
     - name: Start Zabbix services (RHEL)
       when: ansible_os_family == "RedHat"
       systemd:
