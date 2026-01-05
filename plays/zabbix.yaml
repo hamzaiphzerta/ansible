@@ -2,41 +2,26 @@
 - name: Install Zabbix on Ubuntu and RHEL
   hosts: all
   become: true
-  
-  # DÉFINIR AU DÉBUT pour éviter les warnings
+
   vars:
     ansible_python_interpreter: /usr/bin/python3
-  
+    zabbix_db_password: "zabbix123"
+    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+
   environment:
     PYTHONWARNINGS: "ignore"
 
-  vars:
-    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
-    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
-    zabbix_db_password: "zabbix123"
-    postgres_password: "{{ hostvars[inventory_hostname].get('morpheus', {}).get('customOptions', {}).get('dbCustomPassword', 'postgres123') }}"
-    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
-
   tasks:
-    # DNS configuration for both Ubuntu and RHEL
+
+    # --- Ubuntu specific ---
     - name: Configure resolv.conf with Google DNS (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
-    - name: Configure resolv.conf with Google DNS (RHEL)
-      when: ansible_os_family == "RedHat"
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
-    # Clear proxy settings
+
     - name: Clear apt proxy settings (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
-    
-    - name: Clear yum proxy settings (RHEL)
-      when: ansible_os_family == "RedHat"
-      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
-    
-    # Ubuntu-specific tasks
+
     - name: Download Zabbix release package (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       get_url:
@@ -54,64 +39,21 @@
       apt:
         update_cache: yes
 
-    - name: Install Zabbix packages (Ubuntu)
+    - name: Install required packages (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       apt:
         name:
           - zabbix-server-pgsql
           - zabbix-frontend-php
-          - php8.1-pgsql
+          - php-pgsql   # safer, works on Ubuntu 22.04
           - zabbix-apache-conf
           - zabbix-sql-scripts
           - zabbix-agent
         state: present
       register: zabbix_install_ubuntu
 
-    # RHEL-specific tasks
-    - name: Register and subscribe RHEL system
-      when: ansible_os_family == "RedHat"
-      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
-      register: subscription_result
-      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
-      changed_when: subscription_result.rc == 0
-
-    - name: Install Zabbix repository (RHEL)
-      when: ansible_os_family == "RedHat"
-      yum:
-        name: https://repo.zabbix.com/zabbix/7.0/rhel/8/x86_64/zabbix-release-latest.el8.noarch.rpm
-        state: present
-        disable_gpg_check: yes
-
-    - name: Switch PHP module to 8.2 (RHEL)
-      when: ansible_os_family == "RedHat"
-      command: dnf module switch-to php:8.2 -y
-
-    - name: Install Zabbix packages (RHEL)
-      when: ansible_os_family == "RedHat"
-      dnf:
-        name:
-          - zabbix-server-pgsql
-          - zabbix-web-pgsql
-          - zabbix-apache-conf
-          - zabbix-sql-scripts
-          - zabbix-selinux-policy
-          - zabbix-agent
-        state: present
-      register: zabbix_install_rhel
-
-    # PostgreSQL database setup for Zabbix
-    - name: Configure PostgreSQL authentication (RHEL)
-      lineinfile:
-        path: /var/lib/pgsql/data/pg_hba.conf
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-        backup: yes
-      with_items:
-        - { regexp: '^host\s+all\s+all\s+127.0.0.1/32\s+ident', line: 'host    all             all             127.0.0.1/32            md5' }
-        - { regexp: '^local\s+all\s+all\s+peer', line: 'local   all             all                                     md5' }
-      when: ansible_os_family == "RedHat"
-
-    - name: Get PostgreSQL version (Ubuntu)
+    # --- PostgreSQL config (Ubuntu) ---
+    - name: Get PostgreSQL version
       when: ansible_distribution == "Ubuntu"
       shell: ls -1 /etc/postgresql/ | sort -V | tail -n 1
       register: pg_version
@@ -120,12 +62,13 @@
     - name: Configure PostgreSQL authentication (Ubuntu)
       lineinfile:
         path: "/etc/postgresql/{{ pg_version.stdout }}/main/pg_hba.conf"
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
+        regexp: "^(host|local).*all.*all.*"
+        line: "{{ item }}"
         backup: yes
-      with_items:
-        - { regexp: '^host\s+all\s+all\s+127.0.0.1/32\s+peer', line: 'host    all             all             127.0.0.1/32            md5' }
-        - { regexp: '^local\s+all\s+all\s+peer', line: 'local   all             all                                     md5' }
+      loop:
+        - "local   all             all                                     md5"
+        - "host    all             all             127.0.0.1/32            md5"
+      ignore_errors: yes  # prevents failure if regex doesn't match
       when: ansible_distribution == "Ubuntu"
 
     - name: Restart PostgreSQL
@@ -133,58 +76,41 @@
         name: postgresql
         state: restarted
 
-    # PostgreSQL database setup for Zabbix
     - name: Create Zabbix database user
-      become: yes
       become_user: postgres
-      shell: |
-        psql -c "CREATE USER zabbix WITH PASSWORD '{{ zabbix_db_password }}';"
-      args:
-        chdir: /tmp
-      register: create_user_result
-      ignore_errors: yes
+      postgresql_user:
+        name: zabbix
+        password: "{{ zabbix_db_password }}"
+        state: present
 
     - name: Create Zabbix database
-      become: yes
       become_user: postgres
-      shell: |
-        psql -c "CREATE DATABASE zabbix OWNER zabbix;"
-      args:
-        chdir: /tmp
-      register: create_db_result
-      ignore_errors: yes
-
-    - name: Grant privileges to Zabbix user
-      become: yes
-      become_user: postgres
-      shell: |
-        psql -c "GRANT ALL PRIVILEGES ON DATABASE zabbix TO zabbix;"
-      args:
-        chdir: /tmp
-      register: grant_privileges
-      ignore_errors: yes
+      postgresql_db:
+        name: zabbix
+        owner: zabbix
+        state: present
 
     - name: Import Zabbix schema
-      become: yes
       become_user: postgres
       shell: |
         zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | psql zabbix
+      args:
+        warn: false
       register: schema_import
-      changed_when: schema_import.rc == 0
       failed_when: schema_import.rc != 0
+      changed_when: schema_import.rc == 0
 
-    - name: Configure Zabbix server database connection
+    - name: Configure Zabbix server DB connection
       lineinfile:
         path: /etc/zabbix/zabbix_server.conf
         regexp: "{{ item.regexp }}"
         line: "{{ item.line }}"
-      with_items:
+      loop:
         - { regexp: '^DBHost=', line: 'DBHost=localhost' }
         - { regexp: '^DBName=', line: 'DBName=zabbix' }
         - { regexp: '^DBUser=', line: 'DBUser=zabbix' }
         - { regexp: '^DBPassword=', line: 'DBPassword={{ zabbix_db_password }}' }
 
-    # Configure PHP for Zabbix frontend
     - name: Set PHP timezone (Ubuntu)
       lineinfile:
         path: /etc/php/8.1/apache2/php.ini
@@ -192,25 +118,15 @@
         line: "date.timezone = UTC"
       when: ansible_distribution == "Ubuntu"
 
-    - name: Set PHP timezone (RHEL)
-      lineinfile:
-        path: /etc/php.ini
-        regexp: "^;?date.timezone ="
-        line: "date.timezone = UTC"
-      when: ansible_os_family == "RedHat"
-
-    # Configure Apache for Zabbix
     - name: Configure Apache for Zabbix
       copy:
         dest: /etc/zabbix/apache.conf
         content: |
           Alias /zabbix /usr/share/zabbix
-          
           <Directory "/usr/share/zabbix">
               Options FollowSymLinks
               AllowOverride None
               Require all granted
-              
               <IfModule mod_php.c>
                   php_value max_execution_time 300
                   php_value memory_limit 128M
@@ -222,30 +138,15 @@
               </IfModule>
           </Directory>
 
-    # Start services for Ubuntu
     - name: Start Zabbix services (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
       systemd:
         name: "{{ item }}"
         state: restarted
         enabled: yes
-      with_items:
+      loop:
         - zabbix-server
         - zabbix-agent
         - apache2
-
-    # Start services for RHEL
-    - name: Start Zabbix services (RHEL)
-      when: ansible_os_family == "RedHat"
-      systemd:
-        name: "{{ item }}"
-        state: restarted
-        enabled: yes
-      with_items:
-        - zabbix-server
-        - zabbix-agent
-        - httpd
-        - php-fpm
 
     - name: Wait for Zabbix web interface
       uri:
@@ -260,17 +161,15 @@
 
     - name: Clean up downloaded files
       file:
-        path: "{{ item }}"
+        path: /tmp/zabbix-release.deb
         state: absent
-      with_items:
-        - /tmp/zabbix-release.deb
-      ignore_errors: yes
 
     - name: Print installation complete message
       debug:
-        msg: 
+        msg:
           - "Zabbix has been installed successfully."
-          - "Access Zabbix at http://{{ morpheus['server']['internalIp'] }}/zabbix"
+          - "Access Zabbix at http://localhost/zabbix"
           - "Default credentials:"
           - "Username: Admin"
           - "Password: zabbix"
+
