@@ -1,7 +1,7 @@
 ---
 - name: Install Basic Joomla on Ubuntu
   hosts: all
-  become: fasle
+  become: false
   gather_facts: true
   
   vars:
