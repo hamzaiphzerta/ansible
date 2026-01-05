@@ -24,6 +24,12 @@
       apt:
         update_cache: yes
 
+    # --- Install PostgreSQL --- AJOUTÉ
+    - name: Install PostgreSQL
+      apt:
+        name: postgresql
+        state: present
+
     # --- Install Zabbix repo ---
     - name: Download Zabbix release package
       get_url:
