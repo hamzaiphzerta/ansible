@@ -2,20 +2,17 @@
 - name: Install Zabbix on Ubuntu and RHEL
   hosts: all
   become: true
+  
+  # AJOUTÉ: Juste cette ligne pour ignorer le warning
   vars:
+    PYTHONWARNINGS: "ignore:urllib3"
     rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
     rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
     zabbix_db_password: "zabbix123"
     postgres_password: "{{ hostvars[inventory_hostname].get('morpheus', {}).get('customOptions', {}).get('dbCustomPassword', 'postgres123') }}"
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
-    ansible_python_interpreter: /usr/bin/python3  # Ajouté
 
   tasks:
-    # fix??
-    - name: Fix Python dependencies warning
-      shell: |
-        python3 -c "import sys; sys.path.remove(''); import pip; pip.main(['install', '--upgrade', 'urllib3==1.26.6', 'chardet==3.0.4'])" 2>/dev/null || pip3 install "urllib3<2.0" "chardet<4.0.0"
-    
     # DNS configuration for both Ubuntu and RHEL
     - name: Configure resolv.conf with Google DNS (Ubuntu)
       when: ansible_distribution == "Ubuntu"
