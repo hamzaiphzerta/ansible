@@ -82,12 +82,8 @@
     - name: Create Zabbix database user
       become_user: postgres
       shell: |
-        psql -c "DO \$\$ BEGIN
-          IF NOT EXISTS (SELECT FROM pg_catalog.pg_user WHERE usename = 'zabbix') THEN
-            CREATE USER zabbix WITH PASSWORD '{{ zabbix_db_password }}';
-          END IF;
-        END \$\$;"
-
+        psql -c "CREATE DATABASE zabbix OWNER zabbix;" 2>/dev/null || true
+        
     - name: Create Zabbix database
       become_user: postgres
       shell: |
