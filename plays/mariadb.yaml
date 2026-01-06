@@ -30,7 +30,9 @@
       set_fact:
         db_vars_provided: "{{ (db_password | length > 0) and (db_user | length > 0) and (db_name | length > 0) }}"
 
-    # DNS override (safer than shell redirection)
+    # -----------------------------
+    # Networking sanity
+    # -----------------------------
     - name: Configure resolv.conf with Google DNS
       copy:
         dest: /etc/resolv.conf
@@ -39,75 +41,15 @@
           nameserver 8.8.8.8
           nameserver 8.8.4.4
 
-    # Clear proxies safely
-    - name: Clear apt proxy settings (Ubuntu) - best effort
-      when: ansible_distribution == "Ubuntu"
-      file:
-        path: /etc/apt/apt.conf.d/90curtin-aptproxy
-        state: touch
-        mode: "0644"
-      failed_when: false
-
-    - name: Truncate apt proxy settings file (Ubuntu) - best effort
-      when: ansible_distribution == "Ubuntu"
-      copy:
-        dest: /etc/apt/apt.conf.d/90curtin-aptproxy
-        content: ""
-        mode: "0644"
-      failed_when: false
-
-    - name: Remove proxy lines from /etc/yum.conf (RHEL) - best effort
-      when: ansible_os_family == "RedHat"
-      lineinfile:
-        path: /etc/yum.conf
-        regexp: '^(proxy|proxy_username|proxy_password)='
-        state: absent
-      failed_when: false
-
     # -----------------------------
-    # Ubuntu install
+    # Ubuntu install (OFFICIAL REPO ONLY)
     # -----------------------------
     - name: Install prerequisites (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       apt:
         name:
-          - curl
-          - gnupg2
-          - apt-transport-https
           - python3-pymysql
         state: present
-        update_cache: yes
-
-    - name: Ensure keyrings directory exists (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      file:
-        path: /etc/apt/keyrings
-        state: directory
-        mode: "0755"
-
-    - name: Add MariaDB repo key (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      get_url:
-        url: https://mariadb.org/mariadb_release_signing_key.pgp
-        dest: /etc/apt/keyrings/mariadb-keyring.pgp
-        mode: "0644"
-
-    - name: Add MariaDB repository (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      copy:
-        content: |
-          # MariaDB 11.2 repository
-          Types: deb
-          URIs: https://mirror.marwan.ma/mariadb/repo/11.2/ubuntu
-          Suites: jammy
-          Components: main main/debug
-          Signed-By: /etc/apt/keyrings/mariadb-keyring.pgp
-        dest: /etc/apt/sources.list.d/mariadb.sources
-        mode: "0644"
-
-    - name: Update apt cache (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      apt:
         update_cache: yes
 
     - name: Install MariaDB (Ubuntu)
@@ -135,19 +77,6 @@
       failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
       changed_when: repo_result.rc == 0
 
-    - name: Download MariaDB repo setup script (RHEL)
-      when: ansible_os_family == "RedHat"
-      get_url:
-        url: https://downloads.mariadb.com/MariaDB/mariadb_repo_setup
-        dest: /tmp/mariadb_repo_setup
-        mode: "0755"
-
-    - name: Execute MariaDB repo setup script (RHEL)
-      when: ansible_os_family == "RedHat"
-      command: /tmp/mariadb_repo_setup
-      args:
-        creates: /etc/yum.repos.d/mariadb.repo
-
     - name: Install MariaDB server (RHEL)
       when: ansible_os_family == "RedHat"
       yum:
@@ -157,7 +86,7 @@
         state: present
 
     # -----------------------------
-    # Common config
+    # Common configuration
     # -----------------------------
     - name: Enable and start MariaDB
       systemd:
@@ -173,8 +102,7 @@
       until: mariadb_ping.rc == 0
       changed_when: false
 
-    # Set root password only if it's not already set
-    - name: Try setting root password (no password case) - best effort
+    - name: Try setting root password (best effort)
       shell: |
         mysql --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
       register: set_root_pw
@@ -200,14 +128,16 @@
     - name: Create user + grant privileges (optional)
       when: db_vars_provided
       shell: |
-        mysql --user=root --password="{{ mysql_root_password }}" --execute="CREATE USER IF NOT EXISTS '{{ db_user }}'@'%' IDENTIFIED BY '{{ db_password }}'; GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_user }}'@'%'; FLUSH PRIVILEGES;"
+        mysql --user=root --password="{{ mysql_root_password }}" --execute="CREATE USER IF NOT EXISTS '{{ db_user }}'@'%' IDENTIFIED BY '{{ db_password }}';
+        GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_user }}'@'%';
+        FLUSH PRIVILEGES;"
       changed_when: true
 
-    - name: Validation - MariaDB version (must succeed)
+    - name: Validation - MariaDB version
       command: mysql --user=root --password={{ mysql_root_password }} -e "SELECT VERSION();"
       register: mariadb_version
       changed_when: false
 
     - name: Print status
       debug:
-        msg: "MariaDB OK. {{ mariadb_version.stdout_lines | default([]) }} DB vars provided={{ db_vars_provided }} user={{ db_user }} db={{ db_name }}"
+        msg: "MariaDB OK. {{ mariadb_version.stdout_lines | default([]) }}"
