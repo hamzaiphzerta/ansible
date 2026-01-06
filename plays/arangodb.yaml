@@ -1,5 +1,5 @@
 ---
-- name: Install and Configure ArangoDB (Ubuntu 24 - Morpheus)
+- name: Install and Configure ArangoDB (Ubuntu - Morpheus, debug-friendly)
   hosts: all
   become: yes
   gather_facts: yes
@@ -21,7 +21,7 @@
   tasks:
     - name: Fail if not Ubuntu
       ansible.builtin.fail:
-        msg: "Not Ubuntu. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+        msg: "This playbook is intended for Ubuntu. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
       when: ansible_distribution != "Ubuntu"
 
     - name: Install prerequisites (curl, gnupg, ca-certificates)
@@ -53,16 +53,28 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    # Ensure no interactive prompts block install
     - name: Install ArangoDB
       ansible.builtin.apt:
         name: arangodb3
         state: present
-      register: arango_install
 
-    - name: Show install output (debug)
-      ansible.builtin.debug:
-        var: arango_install
+    # Force bind endpoint explicitly (prevents “not listening on localhost” situations)
+    - name: Ensure ArangoDB endpoint is localhost:8529
+      ansible.builtin.lineinfile:
+        path: /etc/arangodb3/arangod.conf
+        regexp: '^#?\s*endpoint\s*='
+        line: 'endpoint = tcp://127.0.0.1:8529'
+        insertafter: '^\[server\]'
+
+    - name: Enable authentication in ArangoDB configuration
+      ansible.builtin.lineinfile:
+        path: /etc/arangodb3/arangod.conf
+        regexp: '^#?\s*authentication\s*='
+        line: 'authentication = true'
+        insertafter: '^\[server\]'
+
+    - name: Reload systemd
+      ansible.builtin.command: systemctl daemon-reload
       changed_when: false
 
     - name: Enable and start ArangoDB service
@@ -71,53 +83,47 @@
         state: started
         enabled: yes
 
-    # Quick health check: show service + logs BEFORE wait_for, so we don't fail blind
-    - name: Check arangodb3 service status (no fail)
+    # If service didn't start, FAIL with journal (so you see the real reason in Morpheus output)
+    - name: Check arangodb3 is active
+      ansible.builtin.command: systemctl is-active arangodb3
+      register: arango_active
+      changed_when: false
+      failed_when: false
+
+    - name: Dump arangodb3 status + journal if not active
       ansible.builtin.shell: |
         set +e
+        echo "=== systemctl status arangodb3 ==="
         systemctl status arangodb3 --no-pager -l
-        echo "---- journalctl (last 200 lines) ----"
-        journalctl -u arangodb3 --no-pager -n 200
-        echo "---- listening ports ----"
+        echo
+        echo "=== journalctl -u arangodb3 (last 250 lines) ==="
+        journalctl -u arangodb3 --no-pager -n 250
+        echo
+        echo "=== ss -tulnp | grep 8529/arangod ==="
         ss -tulnp | grep -E '(:8529\b|arangod)' || true
-        echo "---- config snippet ----"
+        echo
+        echo "=== arangod.conf key lines ==="
         grep -nE '^\[server\]|^endpoint|^authentication|^#?authentication' /etc/arangodb3/arangod.conf || true
       args:
         executable: /bin/bash
-      register: arango_diag_pre
+      register: arango_debug
       changed_when: false
+      when: arango_active.stdout != "active"
 
-    - name: Print diagnostics (pre-wait)
-      ansible.builtin.debug:
-        msg: "{{ arango_diag_pre.stdout }}"
+    - name: Fail with ArangoDB startup logs
+      ansible.builtin.fail:
+        msg: |
+          ArangoDB service is not active.
+          Output:
+          {{ arango_debug.stdout }}
+      when: arango_active.stdout != "active"
 
-    # Wait longer (first boot can be slow)
     - name: Wait for ArangoDB to be ready on 127.0.0.1:8529
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: 8529
-        delay: 5
-        timeout: 240
-
-    # Enable auth (do this after it's confirmed up)
-    - name: Enable authentication in ArangoDB configuration
-      ansible.builtin.lineinfile:
-        path: /etc/arangodb3/arangod.conf
-        regexp: '^#?\s*authentication\s*='
-        line: 'authentication = true'
-        insertafter: '^\[server\]'
-
-    - name: Restart ArangoDB service
-      ansible.builtin.service:
-        name: arangodb3
-        state: restarted
-
-    - name: Wait for ArangoDB after restart
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: 8529
         delay: 3
-        timeout: 240
+        timeout: 60
 
     - name: Set ArangoDB root password (only if provided)
       ansible.builtin.shell: |
