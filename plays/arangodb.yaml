@@ -1,110 +1,145 @@
 ---
-- name: Install and Configure ArangoDB
+- name: Install and Configure ArangoDB (Ubuntu 24.04 safe)
   hosts: all
   become: yes
+
   vars:
     db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
     db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
     db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
     root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
-    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
-    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
-  tasks:
-    # DNS configuration for both Ubuntu and RHEL
-    - name: Configure resolv.conf with Google DNS (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
-    - name: Configure resolv.conf with Google DNS (RHEL)
-      when: ansible_os_family == "RedHat"
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
-    # Clear proxy settings
-    - name: Clear apt proxy settings (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
-    
-    - name: Clear yum proxy settings (RHEL)
-      when: ansible_os_family == "RedHat"
-      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
-    
-    - name: Add ArangoDB GPG key
-      apt_key:
-        url: https://download.arangodb.com/arangodb312/DEBIAN/Release.key
-        state: present
 
-    - name: Add ArangoDB repository
-      apt_repository:
-        repo: "deb https://download.arangodb.com/arangodb312/DEBIAN/ /"
+    # Ubuntu 24.04: do NOT use apt_key (breaks with requests/urllib3 mismatch)
+    arangodb_repo_base: "https://download.arangodb.com/arangodb312/DEBIAN"
+    arangodb_key_url: "https://download.arangodb.com/arangodb312/DEBIAN/Release.key"
+    arangodb_keyring_path: "/usr/share/keyrings/arangodb.gpg"
+    arangodb_repo_line: "deb [signed-by={{ arangodb_keyring_path }}] {{ arangodb_repo_base }}/ /"
+
+  tasks:
+    # --- Safety: Ubuntu-only (since you're on Ubuntu 24) ---
+    - name: Fail if not Ubuntu
+      ansible.builtin.fail:
+        msg: "This playbook is intended for Ubuntu. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+      when: ansible_distribution != "Ubuntu"
+
+    # DNS configuration (keep your behavior, but use a safer module)
+    - name: Configure resolv.conf with Google DNS (Ubuntu)
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        content: "nameserver 8.8.8.8\n"
+        mode: "0644"
+
+    # Clear apt proxy settings (keep your behavior)
+    - name: Clear apt proxy settings (Ubuntu)
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/90curtin-aptproxy
+        content: ""
+        mode: "0644"
+
+    # Prereqs for keyring method
+    - name: Install prerequisites (ca-certificates, curl, gnupg)
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: yes
+
+    # --- FIX: Replace apt_key with keyring + signed-by ---
+    - name: Download ArangoDB Release key (ASCII)
+      ansible.builtin.get_url:
+        url: "{{ arangodb_key_url }}"
+        dest: /tmp/arangodb-release.key
+        mode: "0644"
+
+    - name: Create ArangoDB keyring (dearmor)
+      ansible.builtin.command: >
+        gpg --dearmor -o {{ arangodb_keyring_path }} /tmp/arangodb-release.key
+      args:
+        creates: "{{ arangodb_keyring_path }}"
+
+    - name: Add ArangoDB repository (signed-by)
+      ansible.builtin.apt_repository:
+        repo: "{{ arangodb_repo_line }}"
         state: present
         filename: arangodb
 
     - name: Update apt cache
-      apt:
+      ansible.builtin.apt:
         update_cache: yes
         cache_valid_time: 3600
 
     - name: Install ArangoDB
-      apt:
+      ansible.builtin.apt:
         name: arangodb3
         state: present
 
     - name: Enable and start ArangoDB service
-      service:
+      ansible.builtin.service:
         name: arangodb3
         state: started
         enabled: yes
 
     - name: Wait for ArangoDB to be ready
-      wait_for:
+      ansible.builtin.wait_for:
         host: 127.0.0.1
         port: 8529
         delay: 5
-        timeout: 30
+        timeout: 60
 
-    - name: Set ArangoDB root password
-      shell: |
+    - name: Set ArangoDB root password (only if provided)
+      ansible.builtin.shell: |
         arangosh \
           --server.endpoint tcp://127.0.0.1:8529 \
           --javascript.execute-string "require('@arangodb/users').update('root', '{{ root_password }}');"
+      args:
+        executable: /bin/bash
+      when: root_password != ""
 
     - name: Enable authentication in ArangoDB configuration
-      lineinfile:
+      ansible.builtin.lineinfile:
         path: /etc/arangodb3/arangod.conf
-        regexp: '^#?authentication'
+        regexp: '^#?\s*authentication\s*='
         line: 'authentication = true'
-        insertafter: '[server]'
+        insertafter: '^\[server\]'
 
     - name: Restart ArangoDB service
-      service:
+      ansible.builtin.service:
         name: arangodb3
         state: restarted
 
     - name: Proceed with database setup if credentials are provided
       block:
         - name: Create ArangoDB database
-          shell: |
+          ansible.builtin.shell: |
             arangosh \
               --server.endpoint tcp://127.0.0.1:8529 \
               --server.username root \
               --server.password '{{ root_password }}' \
               --javascript.execute-string "db._createDatabase('{{ db_name }}');"
+          args:
+            executable: /bin/bash
 
         - name: Create ArangoDB user
-          shell: |
+          ansible.builtin.shell: |
             arangosh \
               --server.endpoint tcp://127.0.0.1:8529 \
               --server.username root \
               --server.password '{{ root_password }}' \
               --javascript.execute-string "require('@arangodb/users').save('{{ db_user }}', '{{ db_password }}');"
+          args:
+            executable: /bin/bash
 
         - name: Grant user access to database
-          shell: |
+          ansible.builtin.shell: |
             arangosh \
               --server.endpoint tcp://127.0.0.1:8529 \
               --server.username root \
               --server.password '{{ root_password }}' \
               --javascript.execute-string "require('@arangodb/users').grantDatabase('{{ db_user }}', '{{ db_name }}');"
+          args:
+            executable: /bin/bash
       when:
         - db_name != ''
         - db_user != ''
@@ -112,7 +147,7 @@
         - root_password != ''
 
     - name: Skip database setup if credentials are not provided
-      debug:
+      ansible.builtin.debug:
         msg: "Database credentials not provided; skipping database and user creation."
       when:
         - db_name == '' or db_user == '' or db_password == '' or root_password == ''
