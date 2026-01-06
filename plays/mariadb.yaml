@@ -30,19 +30,30 @@
       set_fact:
         db_vars_provided: "{{ (db_password | length > 0) and (db_user | length > 0) and (db_name | length > 0) }}"
 
-    # (Optional) DNS override
+    # DNS override (safer than shell redirection)
     - name: Configure resolv.conf with Google DNS
-      shell: "echo nameserver 8.8.8.8 > /etc/resolv.conf"
-      args:
-        warn: false
-      changed_when: true
+      copy:
+        dest: /etc/resolv.conf
+        mode: "0644"
+        content: |
+          nameserver 8.8.8.8
+          nameserver 8.8.4.4
 
     # Clear proxies safely
     - name: Clear apt proxy settings (Ubuntu) - best effort
       when: ansible_distribution == "Ubuntu"
-      shell: "truncate -s 0 /etc/apt/apt.conf.d/90curtin-aptproxy"
-      args:
-        warn: false
+      file:
+        path: /etc/apt/apt.conf.d/90curtin-aptproxy
+        state: touch
+        mode: "0644"
+      failed_when: false
+
+    - name: Truncate apt proxy settings file (Ubuntu) - best effort
+      when: ansible_distribution == "Ubuntu"
+      copy:
+        dest: /etc/apt/apt.conf.d/90curtin-aptproxy
+        content: ""
+        mode: "0644"
       failed_when: false
 
     - name: Remove proxy lines from /etc/yum.conf (RHEL) - best effort
@@ -67,19 +78,19 @@
         state: present
         update_cache: yes
 
-    - name: Add MariaDB repo key (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      get_url:
-        url: https://mariadb.org/mariadb_release_signing_key.pgp
-        dest: /etc/apt/keyrings/mariadb-keyring.pgp
-        mode: "0644"
-
     - name: Ensure keyrings directory exists (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       file:
         path: /etc/apt/keyrings
         state: directory
         mode: "0755"
+
+    - name: Add MariaDB repo key (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      get_url:
+        url: https://mariadb.org/mariadb_release_signing_key.pgp
+        dest: /etc/apt/keyrings/mariadb-keyring.pgp
+        mode: "0644"
 
     - name: Add MariaDB repository (Ubuntu)
       when: ansible_distribution == "Ubuntu"
