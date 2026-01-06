@@ -1,5 +1,5 @@
 ---
-- name: Install and Configure ArangoDB (Ubuntu 24.04 / Noble - Morpheus)
+- name: Install and Configure ArangoDB (Ubuntu 24 - no apt_key / no get_url)
   hosts: all
   become: yes
   gather_facts: yes
@@ -10,46 +10,42 @@
     db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
     root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
 
-    # ArangoDB 3.12 repo (as you used)
     arangodb_repo_base: "https://download.arangodb.com/arangodb312/DEBIAN"
     arangodb_key_url: "https://download.arangodb.com/arangodb312/DEBIAN/Release.key"
     arangodb_keyring_path: "/usr/share/keyrings/arangodb.gpg"
     arangodb_repo_line: "deb [signed-by={{ arangodb_keyring_path }}] {{ arangodb_repo_base }}/ /"
 
   tasks:
-    # --- Hard guard: you said Ubuntu 24, so fail early if not Ubuntu ---
-    - name: Fail if not Ubuntu
+    - name: Fail if not Ubuntu (proof you are running the new playbook)
       ansible.builtin.fail:
-        msg: "This playbook is intended for Ubuntu 24. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+        msg: "Not Ubuntu. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
       when: ansible_distribution != "Ubuntu"
 
-    # --- Optional: show OS facts in logs (helps debugging Morpheus runs) ---
-    - name: Display OS / Python information
+    - name: PROOF-NEW | Show OS + python (confirm Ubuntu 24 + python version)
       ansible.builtin.shell: |
         set -e
-        echo "OS:" && cat /etc/os-release || true
-        echo "python3:" && (python3 --version || true)
-        echo "python3 path:" && (which python3 || true)
+        echo "=== /etc/os-release ==="
+        cat /etc/os-release
+        echo "=== python3 ==="
+        python3 --version || true
+        which python3 || true
       args:
         executable: /bin/bash
       changed_when: false
 
-    # DNS config (keeps your behavior; note: may be overwritten by systemd-resolved/cloud-init later)
-    - name: Configure resolv.conf with Google DNS (Ubuntu)
+    - name: Configure resolv.conf with Google DNS
       ansible.builtin.copy:
         dest: /etc/resolv.conf
         content: "nameserver 8.8.8.8\n"
         mode: "0644"
 
-    # Clear apt proxy settings (keep your behavior)
-    - name: Clear apt proxy settings (Ubuntu)
+    - name: Clear apt proxy settings
       ansible.builtin.copy:
         dest: /etc/apt/apt.conf.d/90curtin-aptproxy
         content: ""
         mode: "0644"
 
-    # Prereqs (curl + gnupg needed for keyring method)
-    - name: Install prerequisites (ca-certificates, curl, gnupg)
+    - name: Install prerequisites (curl, gnupg, ca-certificates)
       ansible.builtin.apt:
         name:
           - ca-certificates
@@ -58,8 +54,7 @@
         state: present
         update_cache: yes
 
-    # IMPORTANT: Bypass Python HTTPS (requests/urllib3 mismatch) by using curl
-    - name: Create ArangoDB keyring using curl (bypass Python requests)
+    - name: PROOF-NEW | Create ArangoDB keyring using curl (bypass Python HTTPS)
       ansible.builtin.shell: |
         set -euo pipefail
         curl -fsSL "{{ arangodb_key_url }}" | gpg --dearmor -o "{{ arangodb_keyring_path }}"
@@ -68,7 +63,7 @@
         executable: /bin/bash
         creates: "{{ arangodb_keyring_path }}"
 
-    - name: Add ArangoDB repository (signed-by)
+    - name: Add ArangoDB repository (signed-by keyring)
       ansible.builtin.apt_repository:
         repo: "{{ arangodb_repo_line }}"
         state: present
@@ -97,7 +92,6 @@
         delay: 5
         timeout: 90
 
-    # Enable authentication in config (do it before setting passwords on some setups)
     - name: Enable authentication in ArangoDB configuration
       ansible.builtin.lineinfile:
         path: /etc/arangodb3/arangod.conf
@@ -117,7 +111,6 @@
         delay: 3
         timeout: 90
 
-    # Root password set (only if provided)
     - name: Set ArangoDB root password (only if provided)
       ansible.builtin.shell: |
         set -euo pipefail
