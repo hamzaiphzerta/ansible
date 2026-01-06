@@ -1,5 +1,5 @@
 ---
-- name: Install Zabbix 7.0 on Ubuntu 22.04 - PRODUCTION
+- name: Install Zabbix 7.0 on Ubuntu 22.04 
   hosts: all
   become: true
 
