@@ -1,7 +1,8 @@
 ---
-- name: Install and Configure ArangoDB (Ubuntu 24.04 safe)
+- name: Install and Configure ArangoDB (Ubuntu 24.04 / Noble - Morpheus)
   hosts: all
   become: yes
+  gather_facts: yes
 
   vars:
     db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
@@ -9,20 +10,31 @@
     db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
     root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
 
-    # Ubuntu 24.04: do NOT use apt_key (breaks with requests/urllib3 mismatch)
+    # ArangoDB 3.12 repo (as you used)
     arangodb_repo_base: "https://download.arangodb.com/arangodb312/DEBIAN"
     arangodb_key_url: "https://download.arangodb.com/arangodb312/DEBIAN/Release.key"
     arangodb_keyring_path: "/usr/share/keyrings/arangodb.gpg"
     arangodb_repo_line: "deb [signed-by={{ arangodb_keyring_path }}] {{ arangodb_repo_base }}/ /"
 
   tasks:
-    # --- Safety: Ubuntu-only (since you're on Ubuntu 24) ---
+    # --- Hard guard: you said Ubuntu 24, so fail early if not Ubuntu ---
     - name: Fail if not Ubuntu
       ansible.builtin.fail:
-        msg: "This playbook is intended for Ubuntu. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+        msg: "This playbook is intended for Ubuntu 24. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
       when: ansible_distribution != "Ubuntu"
 
-    # DNS configuration (keep your behavior, but use a safer module)
+    # --- Optional: show OS facts in logs (helps debugging Morpheus runs) ---
+    - name: Display OS / Python information
+      ansible.builtin.shell: |
+        set -e
+        echo "OS:" && cat /etc/os-release || true
+        echo "python3:" && (python3 --version || true)
+        echo "python3 path:" && (which python3 || true)
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # DNS config (keeps your behavior; note: may be overwritten by systemd-resolved/cloud-init later)
     - name: Configure resolv.conf with Google DNS (Ubuntu)
       ansible.builtin.copy:
         dest: /etc/resolv.conf
@@ -36,7 +48,7 @@
         content: ""
         mode: "0644"
 
-    # Prereqs for keyring method
+    # Prereqs (curl + gnupg needed for keyring method)
     - name: Install prerequisites (ca-certificates, curl, gnupg)
       ansible.builtin.apt:
         name:
@@ -46,17 +58,14 @@
         state: present
         update_cache: yes
 
-    # --- FIX: Replace apt_key with keyring + signed-by ---
-    - name: Download ArangoDB Release key (ASCII)
-      ansible.builtin.get_url:
-        url: "{{ arangodb_key_url }}"
-        dest: /tmp/arangodb-release.key
-        mode: "0644"
-
-    - name: Create ArangoDB keyring (dearmor)
-      ansible.builtin.command: >
-        gpg --dearmor -o {{ arangodb_keyring_path }} /tmp/arangodb-release.key
+    # IMPORTANT: Bypass Python HTTPS (requests/urllib3 mismatch) by using curl
+    - name: Create ArangoDB keyring using curl (bypass Python requests)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -fsSL "{{ arangodb_key_url }}" | gpg --dearmor -o "{{ arangodb_keyring_path }}"
+        chmod 0644 "{{ arangodb_keyring_path }}"
       args:
+        executable: /bin/bash
         creates: "{{ arangodb_keyring_path }}"
 
     - name: Add ArangoDB repository (signed-by)
@@ -86,17 +95,9 @@
         host: 127.0.0.1
         port: 8529
         delay: 5
-        timeout: 60
+        timeout: 90
 
-    - name: Set ArangoDB root password (only if provided)
-      ansible.builtin.shell: |
-        arangosh \
-          --server.endpoint tcp://127.0.0.1:8529 \
-          --javascript.execute-string "require('@arangodb/users').update('root', '{{ root_password }}');"
-      args:
-        executable: /bin/bash
-      when: root_password != ""
-
+    # Enable authentication in config (do it before setting passwords on some setups)
     - name: Enable authentication in ArangoDB configuration
       ansible.builtin.lineinfile:
         path: /etc/arangodb3/arangod.conf
@@ -109,10 +110,29 @@
         name: arangodb3
         state: restarted
 
+    - name: Wait for ArangoDB after restart
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8529
+        delay: 3
+        timeout: 90
+
+    # Root password set (only if provided)
+    - name: Set ArangoDB root password (only if provided)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        arangosh \
+          --server.endpoint tcp://127.0.0.1:8529 \
+          --javascript.execute-string "require('@arangodb/users').update('root', '{{ root_password }}');"
+      args:
+        executable: /bin/bash
+      when: root_password != ""
+
     - name: Proceed with database setup if credentials are provided
       block:
         - name: Create ArangoDB database
           ansible.builtin.shell: |
+            set -euo pipefail
             arangosh \
               --server.endpoint tcp://127.0.0.1:8529 \
               --server.username root \
@@ -123,6 +143,7 @@
 
         - name: Create ArangoDB user
           ansible.builtin.shell: |
+            set -euo pipefail
             arangosh \
               --server.endpoint tcp://127.0.0.1:8529 \
               --server.username root \
@@ -133,6 +154,7 @@
 
         - name: Grant user access to database
           ansible.builtin.shell: |
+            set -euo pipefail
             arangosh \
               --server.endpoint tcp://127.0.0.1:8529 \
               --server.username root \
