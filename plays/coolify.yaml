@@ -81,7 +81,22 @@
         - "{{ coolify_dir }}/data"
 
     # -----------------------
-    # Download Coolify install script (use curl instead of get_url prc la version of python li eendna qdima)
+    # Pre-pull required Docker images
+    # -----------------------
+    - name: Pull Coolify helper image
+      docker_image:
+        name: ghcr.io/coollabsio/coolify-helper
+        tag: 1.0.12
+        source: pull
+
+    - name: Pull main Coolify image
+      docker_image:
+        name: ghcr.io/coollabsio/coolify
+        tag: latest
+        source: pull
+
+    # -----------------------
+    # Download Coolify install script
     # -----------------------
     - name: Download Coolify install script
       shell: curl -fsSL https://cdn.coollabs.io/coolify/install.sh -o /tmp/coolify_install.sh
