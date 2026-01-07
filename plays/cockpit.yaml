@@ -1,5 +1,5 @@
 ---
-- name: Install Cockpit on Ubuntu 24.04 (fixed, Morpheus-ready)
+- name: Install Cockpit on Ubuntu 24.04 
   hosts: all
   become: yes
 
