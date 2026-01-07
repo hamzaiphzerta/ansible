@@ -2,14 +2,12 @@
 - name: Install Apache NiFi on Ubuntu 24.04
   hosts: all
   become: yes
-  gather_facts: yes
-
+  
   vars:
     nifi_version: "1.24.0"
     nifi_user: nifi
     nifi_group: nifi
-    nifi_install_dir: /opt/nifi
-    nifi_home: /opt/nifi/nifi-current
+    nifi_home: /opt/nifi  # Simple path, no symlink
     nifi_port: 8080
 
   tasks:
@@ -18,12 +16,12 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install Java and required tools
+    - name: Install Java and tools
       apt:
         name:
           - openjdk-17-jdk
           - unzip
-          - wget  
+          - wget
         state: present
 
     - name: Create NiFi group
@@ -39,51 +37,26 @@
         shell: /usr/sbin/nologin
         create_home: no
 
-    - name: Ensure parent directory exists
-      file:
-        path: /opt
-        state: directory
-        mode: "0755"
-
-    - name: Download Apache NiFi (ZIP)
+    - name: Download NiFi
       shell: |
-        # Try multiple mirrors
-        wget --no-check-certificate --timeout=30 \
+        wget -q --no-check-certificate \
           "https://archive.apache.org/dist/nifi/{{ nifi_version }}/nifi-{{ nifi_version }}-bin.zip" \
-          -O "/tmp/nifi-{{ nifi_version }}.zip" 2>/dev/null || \
-        wget --no-check-certificate --timeout=30 \
-          "https://dlcdn.apache.org/nifi/{{ nifi_version }}/nifi-{{ nifi_version }}-bin.zip" \
-          -O "/tmp/nifi-{{ nifi_version }}.zip" 2>/dev/null || \
-        curl -Lk \
-          "https://archive.apache.org/dist/nifi/{{ nifi_version }}/nifi-{{ nifi_version }}-bin.zip" \
-          -o "/tmp/nifi-{{ nifi_version }}.zip" 2>/dev/null
+          -O "/tmp/nifi-{{ nifi_version }}.zip"
       args:
         creates: "/tmp/nifi-{{ nifi_version }}.zip"
-      register: download
-      failed_when: download.rc != 0 and not ('exists' in download.stdout)
 
-    - name: Extract NiFi
-      unarchive:
-        src: "/tmp/nifi-{{ nifi_version }}.zip"
-        dest: /opt 
-        remote_src: yes
-        creates: "/opt/nifi-{{ nifi_version }}"
+    - name: Extract and setup NiFi (all in one)
+      shell: |
+        # Extract
+        unzip -q "/tmp/nifi-{{ nifi_version }}.zip" -d /opt
+        # Rename to simple path
+        mv "/opt/nifi-{{ nifi_version }}" "{{ nifi_home }}"
+        # Set permissions
+        chown -R {{ nifi_user }}:{{ nifi_group }} "{{ nifi_home }}"
+      args:
+        creates: "{{ nifi_home }}"  # Only run if NiFi not installed
 
-    - name: Create symbolic link
-      file:
-        src: "/opt/nifi-{{ nifi_version }}"
-        dest: "{{ nifi_home }}"
-        state: link
-        force: yes
-
-    - name: Set ownership
-      file:
-        path: "/opt/nifi-{{ nifi_version }}"
-        owner: "{{ nifi_user }}"
-        group: "{{ nifi_group }}"
-        recurse: yes
-
-    - name: Configure NiFi HTTP host
+    - name: Configure NiFi to listen on all interfaces
       lineinfile:
         path: "{{ nifi_home }}/conf/nifi.properties"
         regexp: "^nifi.web.http.host="
@@ -91,7 +64,7 @@
         create: yes
         backup: yes
 
-    - name: Configure NiFi HTTP port
+    - name: Configure NiFi port
       lineinfile:
         path: "{{ nifi_home }}/conf/nifi.properties"
         regexp: "^nifi.web.http.port="
@@ -99,28 +72,40 @@
         create: yes
         backup: yes
 
-    - name: Check if NiFi is running
+    - name: Check if NiFi is already running
       shell: |
-        ps aux | grep -v grep | grep nifi || echo "NOT_RUNNING"
+        pgrep -f nifi 2>/dev/null || echo "NOT_RUNNING"
       register: nifi_status
       changed_when: false
+      ignore_errors: yes
 
-    - name: Start NiFi (if not running)
+    - name: Start NiFi
       command: "{{ nifi_home }}/bin/nifi.sh start"
       become_user: "{{ nifi_user }}"
       when: "'NOT_RUNNING' in nifi_status.stdout"
       args:
         creates: "{{ nifi_home }}/logs/nifi-bootstrap.log"
 
-    - name: Wait for NiFi
+    - name: Wait for NiFi to start
       wait_for:
         port: "{{ nifi_port }}"
-        delay: 20
-        timeout: 240
+        delay: 15
+        timeout: 180
         state: started
 
-    - name: Show access info
+    - name: Clean up download
+      file:
+        path: "/tmp/nifi-{{ nifi_version }}.zip"
+        state: absent
+      ignore_errors: yes
+
+    - name: Show installation info
       debug:
         msg: |
           NiFi {{ nifi_version }} installed successfully!
-          Access UI: http://{{ ansible_default_ipv4.address }}:{{ nifi_port }}/nifi (8080)
+          
+          Access: http://{{ ansible_default_ipv4.address }}:{{ nifi_port }}/nifi
+          
+          Installation: {{ nifi_home }}
+          Run as user: {{ nifi_user }}
+          
