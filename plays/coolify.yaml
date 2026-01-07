@@ -1,62 +1,113 @@
 ---
-- name: Install Coolify on Ubuntu 24.04
+- name: Install Coolify
   hosts: all
   become: true
-  gather_facts: yes
+  vars:
+    coolify_port: 8000
+    coolify_dir: /coolify
 
   tasks:
-    - name: Update apt cache
+    # -----------------------
+    # DNS Configuration
+    # -----------------------
+    - name: Configure DNS (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 8.8.8.8
+          nameserver 8.8.4.4
+
+    - name: Clear apt proxy (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      file:
+        path: /etc/apt/apt.conf.d/90curtin-aptproxy
+        state: absent
+
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install Docker dependencies
+    # -----------------------
+    # Install dependencies
+    # -----------------------
+    - name: Install dependencies (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
       apt:
         name:
-          - docker.io
           - curl
+          - wget
           - git
           - jq
+          - openssl
         state: present
 
-    - name: Start and enable Docker service
+    # -----------------------
+    # Install Docker
+    # -----------------------
+    - name: Install Docker via official script (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      shell: curl -fsSL https://get.docker.com | sh
+      args:
+        creates: /usr/bin/docker
+
+    - name: Start and enable Docker
       systemd:
         name: docker
         state: started
         enabled: yes
 
-    - name: Install Docker Compose (official binary)
-      get_url:
-        url: https://github.com/docker/compose/releases/download/v2.23.1/docker-compose-linux-x86_64
-        dest: /usr/local/bin/docker-compose
-        mode: '0755'
+    # -----------------------
+    # Docker permissions fix
+    # -----------------------
+    - name: Add playbook user to Docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
 
-    - name: Ensure docker-compose is executable
+    # -----------------------
+    # Coolify directories
+    # -----------------------
+    - name: Create Coolify directories
       file:
-        path: /usr/local/bin/docker-compose
+        path: "{{ item }}"
+        state: directory
         mode: '0755'
+      loop:
+        - "{{ coolify_dir }}"
+        - "{{ coolify_dir }}/data"
 
-    - name: Verify Docker Compose installation
-      command: docker-compose --version
-      register: compose_check
-
-    - name: Download Coolify installer
+    # -----------------------
+    # Download Coolify install script
+    # -----------------------
+    - name: Download Coolify install script
       get_url:
         url: https://cdn.coollabs.io/coolify/install.sh
-        dest: /tmp/install-coolify.sh
+        dest: /tmp/coolify_install.sh
         mode: '0755'
 
-    - name: Install Coolify (non-interactive)
-      command: /tmp/install-coolify.sh --non-interactive
-      async: 900  # 15 minutes
-      poll: 15
+    # -----------------------
+    # Execute Coolify installation
+    # -----------------------
+    - name: Execute Coolify install script
+      shell: bash /tmp/coolify_install.sh --non-interactive
+      args:
+        executable: /bin/bash
+      async: 1800
+      poll: 30
 
+    # -----------------------
+    # Wait for Coolify to be ready
+    # -----------------------
     - name: Wait for Coolify to be available
       wait_for:
-        port: 8000
-        delay: 30
+        port: "{{ coolify_port }}"
         timeout: 300
+        delay: 10
 
-    - name: Show Coolify access info
+    - name: Installation complete
       debug:
-        msg: "Coolify installed! Access it at http://{{ ansible_default_ipv4.address }}:8000"
+        msg: "Coolify installed successfully. Access it at https://{{ morpheus['server']['internalIp'] | default('127.0.0.1') }}:{{ coolify_port }}"
