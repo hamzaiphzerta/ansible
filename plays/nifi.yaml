@@ -1,1 +1,105 @@
-TBD
+---
+#flow (install → download → extract → config → start)
+- name: Install Apache NiFi on Ubuntu 24.04
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    nifi_version: "1.24.0"
+    nifi_user: nifi
+    nifi_group: nifi
+    nifi_install_dir: /opt/nifi
+    nifi_home: /opt/nifi/nifi-current
+    nifi_port: 8080
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Java and required tools
+      apt:
+        name:
+          - openjdk-17-jdk
+          - unzip
+        state: present
+
+    - name: Create NiFi group
+      group:
+        name: "{{ nifi_group }}"
+        system: yes
+
+    - name: Create NiFi user
+      user:
+        name: "{{ nifi_user }}"
+        group: "{{ nifi_group }}"
+        system: yes
+        shell: /usr/sbin/nologin
+        create_home: no
+
+    - name: Ensure parent directory exists
+      file:
+        path: /opt
+        state: directory
+        mode: "0755"
+
+    - name: Download Apache NiFi (ZIP)
+      get_url:
+        url: "https://archive.apache.org/dist/nifi/{{ nifi_version }}/nifi-{{ nifi_version }}-bin.zip"
+        dest: "/tmp/nifi-{{ nifi_version }}.zip"
+        timeout: 120
+        validate_certs: no
+
+    - name: Extract NiFi
+      unarchive:
+        src: "/tmp/nifi-{{ nifi_version }}.zip"
+        dest: /opt 
+        remote_src: yes
+        creates: "/opt/nifi-{{ nifi_version }}"
+
+
+    - name: Create symbolic link
+      file:
+        src: "/opt/nifi-{{ nifi_version }}"  # Source is in /opt
+        dest: "{{ nifi_home }}"
+        state: link
+        force: yes
+
+    - name: Set ownership
+      file:
+        path: "/opt/nifi-{{ nifi_version }}"
+        owner: "{{ nifi_user }}"
+        group: "{{ nifi_group }}"
+        recurse: yes
+
+    - name: Configure NiFi HTTP host
+      lineinfile:
+        path: "{{ nifi_home }}/conf/nifi.properties"
+        regexp: "^nifi.web.http.host="
+        line: "nifi.web.http.host=0.0.0.0"
+        create: yes  
+
+    - name: Configure NiFi HTTP port
+      lineinfile:
+        path: "{{ nifi_home }}/conf/nifi.properties"
+        regexp: "^nifi.web.http.port="
+        line: "nifi.web.http.port={{ nifi_port }}"
+        create: yes  
+
+    - name: Start NiFi
+      command: "{{ nifi_home }}/bin/nifi.sh start"
+      become_user: "{{ nifi_user }}"
+      args:
+        creates: "{{ nifi_home }}/logs/nifi-bootstrap.log"  # Make idempotent
+
+    - name: Wait for NiFi
+      wait_for:
+        port: "{{ nifi_port }}"
+        delay: 20
+        timeout: 180
+
+    - name: Show access info
+      debug:
+        msg: "NiFi {{ nifi_version }} running at http://{{ ansible_default_ipv4.address }}:{{ nifi_port }}/nifi"
