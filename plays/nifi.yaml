@@ -1,3 +1,4 @@
+# HNA SHUFI zidi timeout t wait t nifi qlil ??? ' btw katkhdm f wsl " 
 ---
 - name: Install Apache NiFi on Ubuntu 24.04
   hosts: all
@@ -7,7 +8,7 @@
     nifi_version: "1.24.0"
     nifi_user: nifi
     nifi_group: nifi
-    nifi_home: /opt/nifi  # Simple path, no symlink
+    nifi_home: /opt/nifi  
     nifi_port: 8080
 
   tasks:
