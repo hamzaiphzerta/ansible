@@ -1,30 +1,38 @@
 ---
-- name: Install and Configure ArangoDB (Ubuntu - Morpheus, debug-friendly)
+- name: ArangoDB 3.12 Install (Ubuntu 24.04 - Morpheus Day0)
   hosts: all
-  become: yes
-  gather_facts: yes
+  become: true
+  gather_facts: true
 
   vars:
-    db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
-    db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
-    db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
-    root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
+    # Morpheus custom options (safe defaults)
+    arango_root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
+    arango_db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
+    arango_db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
+    arango_db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
 
-    arangodb_repo_base: "https://download.arangodb.com/arangodb312/DEBIAN"
-    arangodb_key_url: "https://download.arangodb.com/arangodb312/DEBIAN/Release.key"
-    arangodb_keyring_path: "/usr/share/keyrings/arangodb.gpg"
-    arangodb_repo_line: "deb [signed-by={{ arangodb_keyring_path }}] {{ arangodb_repo_base }}/ /"
+    # Repo + key (ArangoDB 3.12 example as you used)
+    arango_repo_base: "https://download.arangodb.com/arangodb312/DEBIAN"
+    arango_key_url: "https://download.arangodb.com/arangodb312/DEBIAN/Release.key"
+    arango_keyring: "/usr/share/keyrings/arangodb.gpg"
+    arango_repo: "deb [signed-by={{ arango_keyring }}] {{ arango_repo_base }}/ /"
+
+    # Service / endpoint
+    arango_endpoint: "tcp://127.0.0.1:8529"
+    arango_port: 8529
 
   environment:
     DEBIAN_FRONTEND: noninteractive
 
   tasks:
-    - name: Fail if not Ubuntu
+    # --- Guardrails ---
+    - name: Ensure target is Ubuntu 24.04
       ansible.builtin.fail:
-        msg: "This playbook is intended for Ubuntu. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
-      when: ansible_distribution != "Ubuntu"
+        msg: "This playbook supports Ubuntu 24.04. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+      when: ansible_distribution != "Ubuntu" or ansible_distribution_version is not match("^24\\.04")
 
-    - name: Install prerequisites (curl, gnupg, ca-certificates)
+    # --- Prerequisites ---
+    - name: Install prerequisites
       ansible.builtin.apt:
         name:
           - ca-certificates
@@ -33,150 +41,147 @@
         state: present
         update_cache: yes
 
+    # --- Add repo (NO apt_key, NO get_url) ---
     - name: Create ArangoDB keyring using curl (bypass Python HTTPS)
       ansible.builtin.shell: |
         set -euo pipefail
-        curl -fsSL "{{ arangodb_key_url }}" | gpg --dearmor -o "{{ arangodb_keyring_path }}"
-        chmod 0644 "{{ arangodb_keyring_path }}"
+        curl -fsSL "{{ arango_key_url }}" | gpg --dearmor -o "{{ arango_keyring }}"
+        chmod 0644 "{{ arango_keyring }}"
       args:
         executable: /bin/bash
-        creates: "{{ arangodb_keyring_path }}"
+        creates: "{{ arango_keyring }}"
 
-    - name: Add ArangoDB repository (signed-by keyring)
+    - name: Add ArangoDB repository (signed-by)
       ansible.builtin.apt_repository:
-        repo: "{{ arangodb_repo_line }}"
+        repo: "{{ arango_repo }}"
         state: present
         filename: arangodb
 
-    - name: Update apt cache
+    - name: Update apt cache after adding repo
       ansible.builtin.apt:
         update_cache: yes
-        cache_valid_time: 3600
 
-    - name: Install ArangoDB
+    # --- Install ArangoDB ---
+    - name: Install ArangoDB package
       ansible.builtin.apt:
         name: arangodb3
         state: present
 
-    # Force bind endpoint explicitly (prevents “not listening on localhost” situations)
-    - name: Ensure ArangoDB endpoint is localhost:8529
+    # --- Configure bind endpoint + auth (idempotent) ---
+    - name: Ensure endpoint binds to localhost:8529
       ansible.builtin.lineinfile:
         path: /etc/arangodb3/arangod.conf
         regexp: '^#?\s*endpoint\s*='
-        line: 'endpoint = tcp://127.0.0.1:8529'
+        line: "endpoint = {{ arango_endpoint }}"
         insertafter: '^\[server\]'
 
-    - name: Enable authentication in ArangoDB configuration
+    - name: Enable authentication
       ansible.builtin.lineinfile:
         path: /etc/arangodb3/arangod.conf
         regexp: '^#?\s*authentication\s*='
-        line: 'authentication = true'
+        line: "authentication = true"
         insertafter: '^\[server\]'
 
-    - name: Reload systemd
-      ansible.builtin.command: systemctl daemon-reload
-      changed_when: false
-
-    - name: Enable and start ArangoDB service
+    # --- Start service ---
+    - name: Enable and start ArangoDB
       ansible.builtin.service:
         name: arangodb3
-        state: started
         enabled: yes
+        state: restarted
 
-    # If service didn't start, FAIL with journal (so you see the real reason in Morpheus output)
-    - name: Check arangodb3 is active
+    # --- If it doesn't start, fail with logs (so Morpheus output is useful) ---
+    - name: Check service is active
       ansible.builtin.command: systemctl is-active arangodb3
       register: arango_active
       changed_when: false
       failed_when: false
 
-    - name: Dump arangodb3 status + journal if not active
+    - name: Print status + journal if not active
       ansible.builtin.shell: |
         set +e
         echo "=== systemctl status arangodb3 ==="
         systemctl status arangodb3 --no-pager -l
         echo
-        echo "=== journalctl -u arangodb3 (last 250 lines) ==="
-        journalctl -u arangodb3 --no-pager -n 250
+        echo "=== journalctl -u arangodb3 (last 200 lines) ==="
+        journalctl -u arangodb3 --no-pager -n 200
         echo
-        echo "=== ss -tulnp | grep 8529/arangod ==="
+        echo "=== listening ports ==="
         ss -tulnp | grep -E '(:8529\b|arangod)' || true
-        echo
-        echo "=== arangod.conf key lines ==="
-        grep -nE '^\[server\]|^endpoint|^authentication|^#?authentication' /etc/arangodb3/arangod.conf || true
       args:
         executable: /bin/bash
       register: arango_debug
       changed_when: false
       when: arango_active.stdout != "active"
 
-    - name: Fail with ArangoDB startup logs
+    - name: Fail if ArangoDB service did not start
       ansible.builtin.fail:
         msg: |
           ArangoDB service is not active.
-          Output:
           {{ arango_debug.stdout }}
       when: arango_active.stdout != "active"
 
-    - name: Wait for ArangoDB to be ready on 127.0.0.1:8529
+    # --- Wait until port is listening ---
+    - name: Wait for ArangoDB port
       ansible.builtin.wait_for:
         host: 127.0.0.1
-        port: 8529
-        delay: 3
-        timeout: 60
+        port: "{{ arango_port }}"
+        delay: 2
+        timeout: 120
 
+    # --- Set root password (optional) ---
+    # NOTE: This assumes arangosh can connect locally. If your Arango build enforces auth immediately,
+    # you may need a different bootstrap flow, but this works for many default installs.
     - name: Set ArangoDB root password (only if provided)
       ansible.builtin.shell: |
         set -euo pipefail
         arangosh \
-          --server.endpoint tcp://127.0.0.1:8529 \
-          --javascript.execute-string "require('@arangodb/users').update('root', '{{ root_password }}');"
+          --server.endpoint "{{ arango_endpoint }}" \
+          --javascript.execute-string "require('@arangodb/users').update('root', '{{ arango_root_password }}');"
       args:
         executable: /bin/bash
-      when: root_password != ""
+      when: arango_root_password != ""
 
-    - name: Proceed with database setup if credentials are provided
+    # --- Create DB + user (optional) ---
+    - name: Create DB + user if provided
       block:
-        - name: Create ArangoDB database
+        - name: Create database
           ansible.builtin.shell: |
             set -euo pipefail
             arangosh \
-              --server.endpoint tcp://127.0.0.1:8529 \
+              --server.endpoint "{{ arango_endpoint }}" \
               --server.username root \
-              --server.password '{{ root_password }}' \
-              --javascript.execute-string "db._createDatabase('{{ db_name }}');"
+              --server.password "{{ arango_root_password }}" \
+              --javascript.execute-string "db._createDatabase('{{ arango_db_name }}');"
           args:
             executable: /bin/bash
 
-        - name: Create ArangoDB user
+        - name: Create user
           ansible.builtin.shell: |
             set -euo pipefail
             arangosh \
-              --server.endpoint tcp://127.0.0.1:8529 \
+              --server.endpoint "{{ arango_endpoint }}" \
               --server.username root \
-              --server.password '{{ root_password }}' \
-              --javascript.execute-string "require('@arangodb/users').save('{{ db_user }}', '{{ db_password }}');"
+              --server.password "{{ arango_root_password }}" \
+              --javascript.execute-string "require('@arangodb/users').save('{{ arango_db_user }}', '{{ arango_db_password }}');"
           args:
             executable: /bin/bash
 
-        - name: Grant user access to database
+        - name: Grant user access
           ansible.builtin.shell: |
             set -euo pipefail
             arangosh \
-              --server.endpoint tcp://127.0.0.1:8529 \
+              --server.endpoint "{{ arango_endpoint }}" \
               --server.username root \
-              --server.password '{{ root_password }}' \
-              --javascript.execute-string "require('@arangodb/users').grantDatabase('{{ db_user }}', '{{ db_name }}');"
+              --server.password "{{ arango_root_password }}" \
+              --javascript.execute-string "require('@arangodb/users').grantDatabase('{{ arango_db_user }}', '{{ arango_db_name }}');"
           args:
             executable: /bin/bash
       when:
-        - db_name != ''
-        - db_user != ''
-        - db_password != ''
-        - root_password != ''
+        - arango_db_name != ""
+        - arango_db_user != ""
+        - arango_db_password != ""
+        - arango_root_password != ""
 
-    - name: Skip database setup if credentials are not provided
+    - name: Done
       ansible.builtin.debug:
-        msg: "Database credentials not provided; skipping database and user creation."
-      when:
-        - db_name == '' or db_user == '' or db_password == '' or root_password == ''
+        msg: "ArangoDB installed and running on {{ arango_endpoint }} (auth enabled)."
