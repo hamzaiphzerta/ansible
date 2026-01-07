@@ -1,44 +1,52 @@
-
 ---
-- name: Install and Configure Cockpit on Ubuntu 24.04
+- name: Install Cockpit on Ubuntu 24.04 (fixed, Morpheus-ready)
   hosts: all
   become: yes
+
   vars:
     cockpit_packages:
       - cockpit
-      - cockpit-storaged  # Optional for storage management
-      - cockpit-networkmanager  # Optional for network management
-      - cockpit-packagekit  # Optional for package management
-      - cockpit-podman  # Optional for container management
+      - cockpit-storaged
+      - cockpit-networkmanager
+      - cockpit-packagekit
 
   tasks:
+    - name: Ensure Google DNS is configured
+      lineinfile:
+        path: /etc/resolv.conf
+        regexp: '^nameserver 8.8.8.8'
+        line: 'nameserver 8.8.8.8'
+        state: present
+      # Optional: ignore if managed by cloud-init ?????????????
+      ignore_errors: yes
+
+    - name: Remove apt proxy file if it exists
+      file:
+        path: /etc/apt/apt.conf.d/90curtin-aptproxy
+        state: absent
+
     - name: Update apt cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install Cockpit and recommended modules
+    - name: Install Cockpit and modules
       apt:
         name: "{{ cockpit_packages }}"
         state: present
-        update_cache: no  
 
     - name: Enable and start Cockpit service
       systemd:
-        name: cockpit.socket 
+        name: cockpit.socket
         enabled: yes
         state: started
-        daemon_reload: yes
-
-    - name: Ensure firewall allows Cockpit (port 9090)
-      ansible.builtin.ufw:
-        rule: allow
-        port: '9090'
-        proto: tcp
-      when: ansible_facts.services['ufw.service'] is defined
 
     - name: Display access information
       debug:
         msg: |
           Cockpit installed successfully!
-          
+          Access via: https://{{ ansible_default_ipv4.address }}:9090
+          Login with system user credentials
+          Packages installed: {{ cockpit_packages | length }}
+
+
