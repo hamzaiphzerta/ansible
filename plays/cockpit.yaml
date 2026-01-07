@@ -1,27 +1,44 @@
+
 ---
-- name: Install Cockpit on Ubuntu
+- name: Install and Configure Cockpit on Ubuntu 24.04
   hosts: all
   become: yes
+  vars:
+    cockpit_packages:
+      - cockpit
+      - cockpit-storaged  # Optional for storage management
+      - cockpit-networkmanager  # Optional for network management
+      - cockpit-packagekit  # Optional for package management
+      - cockpit-podman  # Optional for container management
 
   tasks:
-    - name: Configure resolv.conf with Google DNS
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-
-    - name: Clear apt proxy settings
-      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
-
     - name: Update apt cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install Cockpit
+    - name: Install Cockpit and recommended modules
       apt:
-        name: cockpit
+        name: "{{ cockpit_packages }}"
         state: present
+        update_cache: no  
 
     - name: Enable and start Cockpit service
       systemd:
-        name: cockpit
+        name: cockpit.socket 
         enabled: yes
         state: started
+        daemon_reload: yes
+
+    - name: Ensure firewall allows Cockpit (port 9090)
+      ansible.builtin.ufw:
+        rule: allow
+        port: '9090'
+        proto: tcp
+      when: ansible_facts.services['ufw.service'] is defined
+
+    - name: Display access information
+      debug:
+        msg: |
+          Cockpit installed successfully!
+          
