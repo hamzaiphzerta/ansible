@@ -1,133 +1,58 @@
----
-- name: Install Coolify
+- name: Install Coolify (Minimal & Robust)
   hosts: all
   become: true
   vars:
     coolify_port: 8000
-    coolify_dir: /coolify
 
   tasks:
-    # -----------------------
-    # DNS Configuration
-    # -----------------------
-    - name: Configure DNS (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      copy:
-        dest: /etc/resolv.conf
-        content: |
-          nameserver 8.8.8.8
-          nameserver 8.8.4.4
+    # Install Docker if missing
+    - name: Check if Docker is installed
+      stat:
+        path: /usr/bin/docker
+      register: docker_check
 
-    - name: Clear apt proxy (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      file:
-        path: /etc/apt/apt.conf.d/90curtin-aptproxy
-        state: absent
-
-    - name: Update apt cache (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-
-    # -----------------------
-    # Install dependencies
-    # -----------------------
-    - name: Install dependencies (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      apt:
-        name:
-          - curl
-          - wget
-          - git
-          - jq
-          - openssl
-        state: present
-
-    # -----------------------
-    # Install Docker
-    # -----------------------
-    - name: Install Docker via official script (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Install Docker if missing
       shell: curl -fsSL https://get.docker.com | sh
-      args:
-        creates: /usr/bin/docker
+      when: not docker_check.stat.exists
+      retries: 2
 
-    - name: Start and enable Docker
+    # Start Docker (ALWAYS needed)
+    - name: Ensure Docker is running
       systemd:
         name: docker
         state: started
         enabled: yes
 
-    # -----------------------
-    # Docker permissions fix
-    # -----------------------
-    - name: Add playbook user to Docker group
+    # Add user to group if needed
+    - name: Check Docker group membership
+      shell: id -nG "{{ ansible_user }}" | grep -q docker && echo "in_group" || echo "not_in_group"
+      register: group_check
+      changed_when: false
+
+    - name: Add to Docker group if needed
       user:
         name: "{{ ansible_user }}"
         groups: docker
         append: yes
+      when: "'in_group' not in group_check.stdout"
 
-    # -----------------------
-    # Coolify directories
-    # -----------------------
-    - name: Create Coolify directories
-      file:
-        path: "{{ item }}"
-        state: directory
-        mode: '0755'
-      loop:
-        - "{{ coolify_dir }}"
-        - "{{ coolify_dir }}/data"
+    # Run installer (idempotent - checks if already installed)
+    - name: Check if Coolify is already running
+      shell: |
+        docker ps --filter "name=coolify" --quiet | head -1
+      register: coolify_check
+      changed_when: false
 
-    # -----------------------
-    # Pre-pull required Docker images
-    # -----------------------
-    - name: Pull Coolify helper image
-      docker_image:
-        name: ghcr.io/coollabsio/coolify-helper
-        tag: 1.0.12
-        source: pull
-
-    - name: Pull main Coolify image
-      docker_image:
-        name: ghcr.io/coollabsio/coolify
-        tag: latest
-        source: pull
-
-    # -----------------------
-    # Download Coolify install script
-    # -----------------------
-    - name: Download Coolify install script
-      shell: curl -fsSL https://cdn.coollabs.io/coolify/install.sh -o /tmp/coolify_install.sh
-      args:
-        creates: /tmp/coolify_install.sh
-        executable: /bin/bash
-
-    - name: Set execute permission on install script
-      file:
-        path: /tmp/coolify_install.sh
-        mode: '0755'
-
-    # -----------------------
-    # Execute Coolify installation
-    # -----------------------
-    - name: Execute Coolify install script
-      shell: bash /tmp/coolify_install.sh --non-interactive
-      args:
-        executable: /bin/bash
+    - name: Install Coolify if not present
+      shell: |
+        curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash -s -- --non-interactive
+      when: coolify_check.stdout == ""
       async: 1800
       poll: 30
 
-    # -----------------------
-    # Wait for Coolify to be ready
-    # -----------------------
-    - name: Wait for Coolify to be available
+    # Verify
+    - name: Verify Coolify is accessible
       wait_for:
         port: "{{ coolify_port }}"
-        timeout: 300
-        delay: 10
-
-    - name: Installation complete
-      debug:
-        msg: "Coolify installed successfully. Access it at https://{{ morpheus['server']['internalIp'] | default('127.0.0.1') }}:{{ coolify_port }}"
+        timeout: 120
+      when: coolify_check.stdout == ""
