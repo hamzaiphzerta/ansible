@@ -81,12 +81,17 @@
         - "{{ coolify_dir }}/data"
 
     # -----------------------
-    # Download Coolify install script
+    # Download Coolify install script (use curl instead of get_url prc la version of python li eendna qdima)
     # -----------------------
     - name: Download Coolify install script
-      get_url:
-        url: https://cdn.coollabs.io/coolify/install.sh
-        dest: /tmp/coolify_install.sh
+      shell: curl -fsSL https://cdn.coollabs.io/coolify/install.sh -o /tmp/coolify_install.sh
+      args:
+        creates: /tmp/coolify_install.sh
+        executable: /bin/bash
+
+    - name: Set execute permission on install script
+      file:
+        path: /tmp/coolify_install.sh
         mode: '0755'
 
     # -----------------------
