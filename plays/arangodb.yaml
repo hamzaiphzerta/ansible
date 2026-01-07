@@ -5,19 +5,16 @@
   gather_facts: true
 
   vars:
-    # Morpheus custom options (safe defaults)
     arango_root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
     arango_db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
     arango_db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
     arango_db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
 
-    # Repo + key (ArangoDB 3.12 example as you used)
     arango_repo_base: "https://download.arangodb.com/arangodb312/DEBIAN"
     arango_key_url: "https://download.arangodb.com/arangodb312/DEBIAN/Release.key"
     arango_keyring: "/usr/share/keyrings/arangodb.gpg"
     arango_repo: "deb [signed-by={{ arango_keyring }}] {{ arango_repo_base }}/ /"
 
-    # Service / endpoint
     arango_endpoint: "tcp://127.0.0.1:8529"
     arango_port: 8529
 
@@ -25,13 +22,6 @@
     DEBIAN_FRONTEND: noninteractive
 
   tasks:
-    # --- Guardrails ---
-    - name: Ensure target is Ubuntu 24.04
-      ansible.builtin.fail:
-        msg: "This playbook supports Ubuntu 24.04. Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}"
-      when: ansible_distribution != "Ubuntu" or ansible_distribution_version is not match("^24\\.04")
-
-    # --- Prerequisites ---
     - name: Install prerequisites
       ansible.builtin.apt:
         name:
@@ -41,7 +31,6 @@
         state: present
         update_cache: yes
 
-    # --- Add repo (NO apt_key, NO get_url) ---
     - name: Create ArangoDB keyring using curl (bypass Python HTTPS)
       ansible.builtin.shell: |
         set -euo pipefail
@@ -61,13 +50,12 @@
       ansible.builtin.apt:
         update_cache: yes
 
-    # --- Install ArangoDB ---
     - name: Install ArangoDB package
       ansible.builtin.apt:
         name: arangodb3
         state: present
 
-    # --- Configure bind endpoint + auth (idempotent) ---
+    # --- Configure bind/auth BEFORE starting ---
     - name: Ensure endpoint binds to localhost:8529
       ansible.builtin.lineinfile:
         path: /etc/arangodb3/arangod.conf
@@ -82,21 +70,74 @@
         line: "authentication = true"
         insertafter: '^\[server\]'
 
-    # --- Start service ---
-    - name: Enable and start ArangoDB
+    # --- Start service (first attempt) ---
+    - name: Enable and start ArangoDB (first attempt)
       ansible.builtin.service:
         name: arangodb3
         enabled: yes
-        state: restarted
+        state: started
 
-    # --- If it doesn't start, fail with logs (so Morpheus output is useful) ---
-    - name: Check service is active
+    - name: Check service is active (first attempt)
       ansible.builtin.command: systemctl is-active arangodb3
-      register: arango_active
+      register: arango_active_1
       changed_when: false
       failed_when: false
 
-    - name: Print status + journal if not active
+    # --- If it failed, check journal for the language mismatch and wipe stale data dirs ---
+    - name: Read journal for language mismatch (only if not active)
+      ansible.builtin.shell: |
+        set +e
+        journalctl -u arangodb3 --no-pager -n 200 | tail -n 200
+      args:
+        executable: /bin/bash
+      register: arango_journal_1
+      changed_when: false
+      when: arango_active_1.stdout != "active"
+
+    - name: Stop ArangoDB before wiping stale data (only if language mismatch)
+      ansible.builtin.service:
+        name: arangodb3
+        state: stopped
+      when:
+        - arango_active_1.stdout != "active"
+        - arango_journal_1.stdout is search("Specified language 'en_US'")
+
+    - name: Wipe stale ArangoDB data dirs from template (only if language mismatch)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/arangodb3
+        - /var/lib/arangodb3-apps
+      when:
+        - arango_active_1.stdout != "active"
+        - arango_journal_1.stdout is search("Specified language 'en_US'")
+
+    - name: Recreate ArangoDB data dirs (only if wiped)
+      ansible.builtin.shell: |
+        set -e
+        install -d -o arangodb -g arangodb -m 0700 /var/lib/arangodb3
+        install -d -o arangodb -g arangodb -m 0700 /var/lib/arangodb3-apps
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when:
+        - arango_active_1.stdout != "active"
+        - arango_journal_1.stdout is search("Specified language 'en_US'")
+
+    - name: Start ArangoDB (second attempt after wipe)
+      ansible.builtin.service:
+        name: arangodb3
+        state: started
+        enabled: yes
+
+    - name: Check service is active (second attempt)
+      ansible.builtin.command: systemctl is-active arangodb3
+      register: arango_active_2
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with status + journal if still not active
       ansible.builtin.shell: |
         set +e
         echo "=== systemctl status arangodb3 ==="
@@ -104,23 +145,19 @@
         echo
         echo "=== journalctl -u arangodb3 (last 200 lines) ==="
         journalctl -u arangodb3 --no-pager -n 200
-        echo
-        echo "=== listening ports ==="
-        ss -tulnp | grep -E '(:8529\b|arangod)' || true
       args:
         executable: /bin/bash
       register: arango_debug
       changed_when: false
-      when: arango_active.stdout != "active"
+      when: arango_active_2.stdout != "active"
 
     - name: Fail if ArangoDB service did not start
       ansible.builtin.fail:
         msg: |
-          ArangoDB service is not active.
+          ArangoDB service is not active after retry.
           {{ arango_debug.stdout }}
-      when: arango_active.stdout != "active"
+      when: arango_active_2.stdout != "active"
 
-    # --- Wait until port is listening ---
     - name: Wait for ArangoDB port
       ansible.builtin.wait_for:
         host: 127.0.0.1
@@ -128,9 +165,6 @@
         delay: 2
         timeout: 120
 
-    # --- Set root password (optional) ---
-    # NOTE: This assumes arangosh can connect locally. If your Arango build enforces auth immediately,
-    # you may need a different bootstrap flow, but this works for many default installs.
     - name: Set ArangoDB root password (only if provided)
       ansible.builtin.shell: |
         set -euo pipefail
@@ -141,7 +175,6 @@
         executable: /bin/bash
       when: arango_root_password != ""
 
-    # --- Create DB + user (optional) ---
     - name: Create DB + user if provided
       block:
         - name: Create database
@@ -181,7 +214,3 @@
         - arango_db_user != ""
         - arango_db_password != ""
         - arango_root_password != ""
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "ArangoDB installed and running on {{ arango_endpoint }} (auth enabled)."
