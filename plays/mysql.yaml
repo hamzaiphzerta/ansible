@@ -1,5 +1,5 @@
 ---
-- name: Install and Configure MySQL
+- name: Install and Configure MySQL (Ubuntu + RHEL)
   hosts: all
   become: true
   gather_facts: true
@@ -13,25 +13,47 @@
     rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
 
-  tasks:
-    # --- Safer DNS (avoid clobbering resolv.conf on systems using systemd-resolved) ---
-    - name: Set DNS to 8.8.8.8 (Ubuntu - systemd-resolved)
-      when: ansible_distribution == "Ubuntu"
-      copy:
-        dest: /etc/systemd/resolved.conf.d/99-google-dns.conf
-        content: |
-          [Resolve]
-          DNS=8.8.8.8
-      notify: restart systemd-resolved
+  handlers:
+    - name: restart systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: restarted
 
-    # ---------------- Ubuntu ----------------
+  tasks:
+    # -----------------------------
+    # Optional DNS fix (safe, non-fatal)
+    # -----------------------------
+    - name: Configure DNS via systemd-resolved drop-in (Ubuntu, best-effort)
+      when: ansible_distribution == "Ubuntu"
+      block:
+        - name: Ensure systemd-resolved drop-in directory exists
+          file:
+            path: /etc/systemd/resolved.conf.d
+            state: directory
+            mode: "0755"
+
+        - name: Write Google DNS drop-in
+          copy:
+            dest: /etc/systemd/resolved.conf.d/99-google-dns.conf
+            mode: "0644"
+            content: |
+              [Resolve]
+              DNS=8.8.8.8
+          notify: restart systemd-resolved
+      rescue:
+        - debug:
+            msg: "Skipping DNS drop-in (systemd-resolved drop-in not available)."
+
+    # -----------------------------
+    # Ubuntu: Install + secure access pattern (root socket + admin password user)
+    # -----------------------------
     - name: Update apt cache (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install MySQL server + deps (Ubuntu)
+    - name: Install MySQL Server + PyMySQL (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       apt:
         name:
@@ -39,7 +61,7 @@
           - python3-pymysql
         state: present
 
-    - name: Ensure MySQL is started and enabled (Ubuntu)
+    - name: Ensure MySQL service is started and enabled (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       systemd:
         name: mysql
@@ -52,33 +74,43 @@
         path: /var/run/mysqld/mysqld.sock
         timeout: 60
 
-    # Try socket auth first (works on many Ubuntu installs), else try password auth
-    - name: Check if socket login works (Ubuntu)
+    # BEST PRACTICE ON UBUNTU SERVERS:
+    # - root uses auth_socket (sudo mysql works always)
+    # - create 'admin' user for password-based automation/tests
+    - name: Ensure MySQL root uses auth_socket (Ubuntu)
       when: ansible_distribution == "Ubuntu"
-      command: sudo mysql -NBe "SELECT 1;"
-      register: ubuntu_socket_login
-      changed_when: false
-      failed_when: false
-
-    - name: Set root password using socket login (Ubuntu)
-      when: ansible_distribution == "Ubuntu" and ubuntu_socket_login.rc == 0
       command: >
         sudo mysql -NBe
-        "ALTER USER 'root'@'localhost'
-         IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}';
+        "ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;
          FLUSH PRIVILEGES;"
       changed_when: true
 
-    - name: Set root password using password login (Ubuntu fallback)
-      when: ansible_distribution == "Ubuntu" and ubuntu_socket_login.rc != 0
+    - name: Create admin user for password access (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
       command: >
-        mysql -uroot -p{{ mysql_root_password }} -NBe
-        "ALTER USER 'root'@'localhost'
-         IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}';
+        sudo mysql -NBe
+        "CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';
+         GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;
          FLUSH PRIVILEGES;"
       changed_when: true
 
-    # ---------------- RHEL ----------------
+    - name: Create database if provided (Ubuntu)
+      when: ansible_distribution == "Ubuntu" and (db_name | length > 0)
+      command: >
+        sudo mysql -NBe
+        "CREATE DATABASE IF NOT EXISTS \`{{ db_name }}\`;"
+
+    - name: Create app user and grant privileges if provided (Ubuntu)
+      when: ansible_distribution == "Ubuntu" and (db_user | length > 0) and (db_password | length > 0) and (db_name | length > 0)
+      command: >
+        sudo mysql -NBe
+        "CREATE USER IF NOT EXISTS '{{ db_user }}'@'localhost' IDENTIFIED BY '{{ db_password }}';
+         GRANT ALL PRIVILEGES ON \`{{ db_name }}\`.* TO '{{ db_user }}'@'localhost';
+         FLUSH PRIVILEGES;"
+
+    # -----------------------------
+    # RHEL: Keep your flow but fix root password setting properly for MySQL 8
+    # -----------------------------
     - name: Register and subscribe RHEL system
       when: ansible_os_family == 'RedHat'
       command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
@@ -126,20 +158,19 @@
         state: started
         enabled: yes
 
-    - name: Wait for mysqld to open port 3306 (RHEL)
+    - name: Wait for MySQL to listen on 3306 (RHEL)
       when: ansible_os_family == 'RedHat'
       wait_for:
         port: 3306
         timeout: 60
 
-    # MySQL 8 on RHEL usually generates a TEMP root password in /var/log/mysqld.log
-    - name: Read temporary MySQL root password (RHEL)
+    - name: Read temporary root password from mysqld log (RHEL / MySQL 8)
       when: ansible_os_family == 'RedHat'
       shell: "grep 'temporary password' /var/log/mysqld.log | tail -1 | awk '{print $NF}'"
       register: rhel_temp_root_pw
       changed_when: false
 
-    - name: Set MySQL root password (RHEL, using temp password)
+    - name: Set desired root password (RHEL / MySQL 8)
       when: ansible_os_family == 'RedHat'
       command: >
         mysql --connect-expired-password
@@ -147,21 +178,9 @@
         -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
       changed_when: true
 
-    # --- Optional: create DB + user if provided ---
-    - name: Create database (optional)
-      when: db_name | length > 0
-      command: >
-        mysql -uroot -p{{ mysql_root_password }} -e
-        "CREATE DATABASE IF NOT EXISTS \`{{ db_name }}\`;"
-
-    - name: Create app user and grant privileges (optional)
-      when: db_user | length > 0 and db_password | length > 0 and db_name | length > 0
-      command: >
-        mysql -uroot -p{{ mysql_root_password }} -e
-        "CREATE USER IF NOT EXISTS '{{ db_user }}'@'localhost' IDENTIFIED BY '{{ db_password }}';
-         GRANT ALL PRIVILEGES ON \`{{ db_name }}\`.* TO '{{ db_user }}'@'localhost';
-         FLUSH PRIVILEGES;"
-
+    # -----------------------------
+    # Validation / output
+    # -----------------------------
     - name: Display MySQL version
       command: mysql --version
       register: mysql_version
@@ -171,8 +190,9 @@
       debug:
         var: mysql_version.stdout
 
-  handlers:
-    - name: restart systemd-resolved
-      systemd:
-        name: systemd-resolved
-        state: restarted
+    - name: Show how to login (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      debug:
+        msg:
+          - "Local root login: sudo mysql"
+          - "Password login: mysql -u admin -p  (password is dbCustomPassword or 'rootroot')"
