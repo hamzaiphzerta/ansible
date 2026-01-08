@@ -1,5 +1,5 @@
 ---
-- name: Install Coolify (Robust – Morpheus & Ubuntu)
+- name: Install Coolify 
   hosts: all
   become: true
   gather_facts: yes
