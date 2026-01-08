@@ -1,164 +1,109 @@
 ---
-- name: Install Elastic Stack on Ubuntu 24.04
+- name: Install Elasticsearch Stack
   hosts: all
   become: true
   vars:
     elastic_version: "8.x"
-    # Sécurité: par défaut localhost seulement
-    kibana_host: "localhost"
-    # Option pour exposition externe si nécessaire
-    expose_kibana: true #true écoute sur 0.0.0.0 $$$$$$ >>>> false ? : écoute sur localhost  
 
   tasks:
-    # Nettoyage DNS (optionnel, mieux de garder DHCP)
-    - name: Backup current resolv.conf
-      copy:
-        src: /etc/resolv.conf
-        dest: /etc/resolv.conf.backup
-        remote_src: true
-      when: ansible_distribution == "Ubuntu"
-
-    # Installation des prérequis Ubuntu
-    - name: Install required packages for Ubuntu
+    # Ubuntu-specific tasks
+    - name: Install required packages (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       apt:
         name:
           - apt-transport-https
-          - ca-certificates
           - curl
           - gnupg
-          - lsb-release
+          - ca-certificates
         state: present
         update_cache: yes
 
-    # Setup repository Elasticsearch (méthode officielle)
-    - name: Setup Elasticsearch GPG key
+    - name: Add Elasticsearch GPG key (Ubuntu)
       when: ansible_distribution == "Ubuntu"
-      apt_key:
+      ansible.builtin.apt_key:
         url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
         state: present
 
-    - name: Add Elasticsearch repository
+    - name: Add Elasticsearch repository (Ubuntu)
       when: ansible_distribution == "Ubuntu"
-      apt_repository:
+      ansible.builtin.apt_repository:
         repo: "deb https://artifacts.elastic.co/packages/{{ elastic_version }}/apt stable main"
-        filename: elasticsearch
         state: present
+        filename: "elastic-{{ elastic_version }}"
+
+    - name: Update apt cache (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      apt:
         update_cache: yes
 
-    # Install Java 17 (requis pour Elasticsearch 8.x)
-    - name: Install OpenJDK 17
-      when: ansible_distribution == "Ubuntu"
-      apt:
-        name: openjdk-17-jdk-headless
+    # Common installation tasks
+    - name: Install Elasticsearch, Kibana, Logstash
+      package:
+        name:
+          - elasticsearch
+          - kibana
+          - logstash
         state: present
 
-    # Installation des composants Elastic
-    - name: Install Elasticsearch
-      apt:
-        name: elasticsearch
-        state: present
-
-    - name: Install Kibana
-      apt:
-        name: kibana
-        state: present
-      when: install_kibana | default(true)
-
-    - name: Install Logstash (optionnel)
-      apt:
-        name: logstash
-        state: present
-      when: install_logstash | default(false)
-
-    # Configuration Elasticsearch
-    - name: Configure Elasticsearch basic settings
-      lineinfile:
-        path: /etc/elasticsearch/elasticsearch.yml
-        regexp: '^#network.host:'
-        line: 'network.host: 0.0.0.0'
-      notify: restart elasticsearch
-
-    # Configuration Kibana (plus sécurisée)
-    - name: Configure Kibana host
+    - name: Configure Kibana to listen on all interfaces
       lineinfile:
         path: /etc/kibana/kibana.yml
-        regexp: '^#?server.host:'
-        line: 'server.host: "{{ kibana_host if expose_kibana else "localhost" }}"'
+        regexp: '^server\.host:'
+        line: 'server.host: "0.0.0.0"'
         create: yes
-      when: install_kibana | default(true)
-      notify: restart kibana
 
-    - name: Configure Kibana to connect to Elasticsearch
-      lineinfile:
-        path: /etc/kibana/kibana.yml
-        regexp: '^#?elasticsearch.hosts:'
-        line: 'elasticsearch.hosts: ["http://localhost:9200"]'
-        create: yes
-      when: install_kibana | default(true)
-      notify: restart kibana
+    - name: Ensure systemd override directory exists for Elasticsearch
+      file:
+        path: /etc/systemd/system/elasticsearch.service.d
+        state: directory
+        mode: '0755'
 
-    # Démarrer les services
-    - name: Enable and start Elasticsearch
+    - name: Configure Elasticsearch service with proxy
+      copy:
+        content: |
+          [Service]
+          Environment="NO_PROXY=localhost,127.0.0.1"
+        dest: /etc/systemd/system/elasticsearch.service.d/http-proxy.conf
+        mode: '0644'
+
+    - name: Reload systemd daemon
       systemd:
-        name: elasticsearch
-        enabled: yes
-        state: started
         daemon_reload: yes
 
-    - name: Enable and start Kibana
+    - name: Start and enable Elasticsearch, Kibana, Logstash
       systemd:
-        name: kibana
-        enabled: yes
+        name: "{{ item }}"
         state: started
-      when: install_kibana | default(true)
-
-    - name: Enable and start Logstash
-      systemd:
-        name: logstash
         enabled: yes
-        state: started
-      when: install_logstash | default(false)
+      loop:
+        - elasticsearch
+        - kibana
+        - logstash
 
-    # Sécurité: configuration initiale
-    - name: Wait for Elasticsearch to be ready
+    - name: Wait for Elasticsearch to start
       wait_for:
         port: 9200
-        delay: 15
-        timeout: 120
+        delay: 10
+        timeout: 300
 
-    - name: Get initial elastic password
-      shell: |
-        if [ -f /usr/share/elasticsearch/config/elasticsearch.keystore ]; then
-          /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -b 2>/dev/null || echo "password_not_available_yet"
-        else
-          echo "setup_required"
-        fi
+    - name: Generate Elastic password
+      shell: "/usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic --batch"
       register: elastic_password
       changed_when: false
 
-    - name: Display connection information
+    - name: Generate Kibana enrollment token
+      shell: "/usr/share/elasticsearch/bin/elasticsearch-create-enrollment-token -s kibana"
+      register: kibana_token
+      changed_when: false
+
+    - name: Display Elastic password
       debug:
-        msg: |
-          🎉 Elastic Stack installé sur Ubuntu 24.04!
-          
-          Elasticsearch: http://localhost:9200
-          Kibana: http://localhost:5601
-          
-         
+        var: elastic_password.stdout_lines
 
-  handlers:
-    - name: restart elasticsearch
-      systemd:
-        name: elasticsearch
-        state: restarted
+    - name: Display Kibana enrollment token
+      debug:
+        var: kibana_token.stdout_lines
 
-    - name: restart kibana
-      systemd:
-        name: kibana
-        state: restarted
-
-    - name: restart logstash
-      systemd:
-        name: logstash
-        state: restarted
+    - name: Print installation complete message
+      debug:
+        msg: "Elasticsearch Stack has been installed successfully. Access Kibana at https://{{ ansible_host }}:5601"
