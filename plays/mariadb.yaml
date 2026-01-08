@@ -22,18 +22,6 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Preseed MariaDB root password (best-effort)
-      debconf:
-        name: "mariadb-server"
-        question: "{{ item.question }}"
-        value: "{{ item.value }}"
-        vtype: "password"
-      loop:
-        - { question: "mysql-server/root_password", value: "{{ mariadb_admin_password }}" }
-        - { question: "mysql-server/root_password_again", value: "{{ mariadb_admin_password }}" }
-      changed_when: false
-      failed_when: false
-
     - name: Install MariaDB server + client
       apt:
         name:
@@ -52,6 +40,7 @@
         path: /run/mysqld/mysqld.sock
         timeout: 60
 
+    # Root should be socket-based so sudo mariadb always works
     - name: Force root to unix_socket authentication (MariaDB-safe)
       command: >
         sudo mariadb -NBe
@@ -63,12 +52,12 @@
       command: sudo mariadb -NBe "SELECT 1;"
       changed_when: false
 
-    # ✅ FIX: force admin password every run (prevents drift / wrong secret)
-    - name: Ensure admin user exists and password is set (force)
+    # Admin user for password-based automation/tests (force-reset password every run)
+    - name: Ensure admin user exists + force-reset password (MariaDB portable)
       command: >
         sudo mariadb -NBe
         "CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY '{{ mariadb_admin_password }}';
-         ALTER USER 'admin'@'localhost' IDENTIFIED BY '{{ mariadb_admin_password }}';
+         SET PASSWORD FOR 'admin'@'localhost' = PASSWORD('{{ mariadb_admin_password }}');
          GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;
          FLUSH PRIVILEGES;"
       changed_when: true
@@ -79,14 +68,15 @@
         sudo mariadb -NBe
         "CREATE DATABASE IF NOT EXISTS \`{{ db_name }}\`;"
 
-    - name: Create app user and grant privileges if provided
+    - name: Create app user and grant privileges if provided (force-reset password)
       when: (db_user | length > 0) and (db_password | length > 0) and (db_name | length > 0)
       command: >
         sudo mariadb -NBe
         "CREATE USER IF NOT EXISTS '{{ db_user }}'@'localhost' IDENTIFIED BY '{{ db_password }}';
-         ALTER USER '{{ db_user }}'@'localhost' IDENTIFIED BY '{{ db_password }}';
+         SET PASSWORD FOR '{{ db_user }}'@'localhost' = PASSWORD('{{ db_password }}');
          GRANT ALL PRIVILEGES ON \`{{ db_name }}\`.* TO '{{ db_user }}'@'localhost';
          FLUSH PRIVILEGES;"
+      changed_when: true
 
     - name: Show MariaDB version
       command: mariadb --version
