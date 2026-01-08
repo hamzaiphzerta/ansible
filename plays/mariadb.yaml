@@ -5,7 +5,6 @@
   gather_facts: true
 
   vars:
-    # Morpheus options (fallbacks included)
     mariadb_admin_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('rootroot') }}"
     db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
     db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
@@ -13,24 +12,18 @@
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
 
   tasks:
-    # -----------------------------
-    # Guard: run only on Ubuntu (adjust if you want Debian too)
-    # -----------------------------
     - name: Fail if not Ubuntu (this playbook is Ubuntu-focused)
       when: ansible_distribution != "Ubuntu"
       fail:
-        msg: "This MariaDB playbook currently supports Ubuntu only. Detected: {{ ansible_distribution }}"
+        msg: "This MariaDB playbook supports Ubuntu only. Detected: {{ ansible_distribution }}"
 
-    # -----------------------------
-    # Install MariaDB
-    # -----------------------------
     - name: Update apt cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    # Preseed so apt doesn't prompt
-    - name: Preseed MariaDB root password (non-interactive)
+    # Optional but keeps installs non-interactive on some images
+    - name: Preseed MariaDB root password (best-effort)
       debconf:
         name: "mariadb-server"
         question: "{{ item.question }}"
@@ -40,6 +33,7 @@
         - { question: "mysql-server/root_password", value: "{{ mariadb_admin_password }}" }
         - { question: "mysql-server/root_password_again", value: "{{ mariadb_admin_password }}" }
       changed_when: false
+      failed_when: false
 
     - name: Install MariaDB server + client
       apt:
@@ -60,18 +54,14 @@
         timeout: 60
 
     # -----------------------------
-    # Enforce auth model:
-    # root -> unix_socket (so sudo mariadb works)
-    # admin -> password (for automation)
+    # FIX: Do NOT UPDATE mysql.user (it may be a VIEW in MariaDB)
+    # Use ALTER USER ... IDENTIFIED VIA unix_socket instead.
     # -----------------------------
-    - name: Ensure root uses unix_socket plugin (Ubuntu best practice)
+    - name: Force root to unix_socket authentication (MariaDB-safe)
       command: >
-        mariadb -NBe
-        "UPDATE mysql.user
-         SET plugin='unix_socket', authentication_string=''
-         WHERE User='root' AND Host='localhost';
+        sudo mariadb -NBe
+        "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;
          FLUSH PRIVILEGES;"
-      become: true
       changed_when: true
 
     - name: Verify root socket login works
@@ -86,7 +76,6 @@
          FLUSH PRIVILEGES;"
       changed_when: true
 
-    # Optional: create DB and app user if Morpheus options provided
     - name: Create database if provided
       when: db_name | length > 0
       command: >
@@ -101,9 +90,6 @@
          GRANT ALL PRIVILEGES ON \`{{ db_name }}\`.* TO '{{ db_user }}'@'localhost';
          FLUSH PRIVILEGES;"
 
-    # -----------------------------
-    # Validation output
-    # -----------------------------
     - name: Show MariaDB version
       command: mariadb --version
       register: mariadb_version
