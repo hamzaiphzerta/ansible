@@ -22,7 +22,6 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    # Optional but keeps installs non-interactive on some images
     - name: Preseed MariaDB root password (best-effort)
       debconf:
         name: "mariadb-server"
@@ -53,10 +52,6 @@
         path: /run/mysqld/mysqld.sock
         timeout: 60
 
-    # -----------------------------
-    # FIX: Do NOT UPDATE mysql.user (it may be a VIEW in MariaDB)
-    # Use ALTER USER ... IDENTIFIED VIA unix_socket instead.
-    # -----------------------------
     - name: Force root to unix_socket authentication (MariaDB-safe)
       command: >
         sudo mariadb -NBe
@@ -68,10 +63,12 @@
       command: sudo mariadb -NBe "SELECT 1;"
       changed_when: false
 
-    - name: Create admin user with password for automation
+    # ✅ FIX: force admin password every run (prevents drift / wrong secret)
+    - name: Ensure admin user exists and password is set (force)
       command: >
         sudo mariadb -NBe
         "CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY '{{ mariadb_admin_password }}';
+         ALTER USER 'admin'@'localhost' IDENTIFIED BY '{{ mariadb_admin_password }}';
          GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;
          FLUSH PRIVILEGES;"
       changed_when: true
@@ -87,6 +84,7 @@
       command: >
         sudo mariadb -NBe
         "CREATE USER IF NOT EXISTS '{{ db_user }}'@'localhost' IDENTIFIED BY '{{ db_password }}';
+         ALTER USER '{{ db_user }}'@'localhost' IDENTIFIED BY '{{ db_password }}';
          GRANT ALL PRIVILEGES ON \`{{ db_name }}\`.* TO '{{ db_user }}'@'localhost';
          FLUSH PRIVILEGES;"
 
