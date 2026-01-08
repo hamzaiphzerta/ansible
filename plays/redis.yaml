@@ -5,7 +5,7 @@
 
   vars:
     redis_port: 6379
-    redis_bind: "127.0.0.1"  # Redis is accessible ONLY from the same machine. Change to private IP or 0.0.0.0 if needed.
+    redis_bind: "127.0.0.1"  # Redis is accessible ONLY from the same machine. Change to private IP (better option )  & ordo :  0.0.0.0 .
     redis_password: "redis"
     redis_maxmemory: "512mb"
     redis_policy: "allkeys-lru"
