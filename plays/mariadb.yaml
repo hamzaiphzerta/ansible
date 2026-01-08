@@ -1,143 +1,120 @@
 ---
-- name: Install and Configure MariaDB
+- name: Install and Configure MariaDB (Ubuntu)
   hosts: all
   become: true
   gather_facts: true
 
   vars:
-    ansible_python_interpreter: /usr/bin/python3
-
-    mysql_root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('rootroot') }}"
+    # Morpheus options (fallbacks included)
+    mariadb_admin_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('rootroot') }}"
     db_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomPassword'] | default('') }}"
     db_user: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomUser'] | default('') }}"
     db_name: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['dbCustomName'] | default('') }}"
-
-    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
-    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
-
     ansible_remote_tmp: "/var/tmp/.ansible/tmp"
 
   tasks:
-    - name: Ensure Ansible remote tmp directory exists
-      file:
-        path: "{{ ansible_remote_tmp }}"
-        state: directory
-        mode: "1777"
-        owner: root
-        group: root
-
-    - name: Determine if custom DB vars are provided
-      set_fact:
-        db_vars_provided: "{{ (db_password | length > 0) and (db_user | length > 0) and (db_name | length > 0) }}"
+    # -----------------------------
+    # Guard: run only on Ubuntu (adjust if you want Debian too)
+    # -----------------------------
+    - name: Fail if not Ubuntu (this playbook is Ubuntu-focused)
+      when: ansible_distribution != "Ubuntu"
+      fail:
+        msg: "This MariaDB playbook currently supports Ubuntu only. Detected: {{ ansible_distribution }}"
 
     # -----------------------------
-    # Networking sanity
+    # Install MariaDB
     # -----------------------------
-    - name: Configure resolv.conf with Google DNS
-      copy:
-        dest: /etc/resolv.conf
-        mode: "0644"
-        content: |
-          nameserver 8.8.8.8
-          nameserver 8.8.4.4
-
-    # -----------------------------
-    # Ubuntu install (OFFICIAL REPO ONLY)
-    # -----------------------------
-    - name: Install prerequisites (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Update apt cache
       apt:
-        name:
-          - python3-pymysql
-        state: present
         update_cache: yes
+        cache_valid_time: 3600
 
-    - name: Install MariaDB (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    # Preseed so apt doesn't prompt
+    - name: Preseed MariaDB root password (non-interactive)
+      debconf:
+        name: "mariadb-server"
+        question: "{{ item.question }}"
+        value: "{{ item.value }}"
+        vtype: "password"
+      loop:
+        - { question: "mysql-server/root_password", value: "{{ mariadb_admin_password }}" }
+        - { question: "mysql-server/root_password_again", value: "{{ mariadb_admin_password }}" }
+      changed_when: false
+
+    - name: Install MariaDB server + client
       apt:
         name:
           - mariadb-server
           - mariadb-client
         state: present
 
-    # -----------------------------
-    # RHEL install
-    # -----------------------------
-    - name: Register and subscribe RHEL system
-      when: ansible_os_family == "RedHat"
-      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
-      register: subscription_result
-      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
-      changed_when: subscription_result.rc == 0
-
-    - name: Enable required RHEL repositories
-      when: ansible_os_family == "RedHat"
-      command: subscription-manager repos --enable rhel-{{ ansible_distribution_major_version }}-for-x86_64-appstream-rpms
-      register: repo_result
-      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
-      changed_when: repo_result.rc == 0
-
-    - name: Install MariaDB server (RHEL)
-      when: ansible_os_family == "RedHat"
-      yum:
-        name:
-          - mariadb-server
-          - python3-PyMySQL
-        state: present
-
-    # -----------------------------
-    # Common configuration
-    # -----------------------------
-    - name: Enable and start MariaDB
+    - name: Ensure MariaDB is started and enabled
       systemd:
         name: mariadb
-        enabled: yes
         state: started
+        enabled: yes
 
-    - name: Wait for MariaDB to respond
-      command: mysqladmin ping
-      register: mariadb_ping
-      retries: 15
-      delay: 2
-      until: mariadb_ping.rc == 0
+    - name: Wait for MariaDB socket
+      wait_for:
+        path: /run/mysqld/mysqld.sock
+        timeout: 60
+
+    # -----------------------------
+    # Enforce auth model:
+    # root -> unix_socket (so sudo mariadb works)
+    # admin -> password (for automation)
+    # -----------------------------
+    - name: Ensure root uses unix_socket plugin (Ubuntu best practice)
+      command: >
+        mariadb -NBe
+        "UPDATE mysql.user
+         SET plugin='unix_socket', authentication_string=''
+         WHERE User='root' AND Host='localhost';
+         FLUSH PRIVILEGES;"
+      become: true
+      changed_when: true
+
+    - name: Verify root socket login works
+      command: sudo mariadb -NBe "SELECT 1;"
       changed_when: false
 
-    - name: Try setting root password (best effort)
-      shell: |
-        mysql --user=root --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
-      register: set_root_pw
-      failed_when: false
-      changed_when: set_root_pw.rc == 0
-
-    - name: Remove anonymous users
-      shell: |
-        mysql --user=root --password="{{ mysql_root_password }}" --execute="DELETE FROM mysql.user WHERE User=''; FLUSH PRIVILEGES;"
+    - name: Create admin user with password for automation
+      command: >
+        sudo mariadb -NBe
+        "CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY '{{ mariadb_admin_password }}';
+         GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;
+         FLUSH PRIVILEGES;"
       changed_when: true
 
-    - name: Remove test database
-      shell: |
-        mysql --user=root --password="{{ mysql_root_password }}" --execute="DROP DATABASE IF EXISTS test; DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%'; FLUSH PRIVILEGES;"
-      changed_when: true
+    # Optional: create DB and app user if Morpheus options provided
+    - name: Create database if provided
+      when: db_name | length > 0
+      command: >
+        sudo mariadb -NBe
+        "CREATE DATABASE IF NOT EXISTS \`{{ db_name }}\`;"
 
-    - name: Create database (optional)
-      when: db_vars_provided
-      shell: |
-        mysql --user=root --password="{{ mysql_root_password }}" --execute="CREATE DATABASE IF NOT EXISTS {{ db_name }};"
-      changed_when: true
+    - name: Create app user and grant privileges if provided
+      when: (db_user | length > 0) and (db_password | length > 0) and (db_name | length > 0)
+      command: >
+        sudo mariadb -NBe
+        "CREATE USER IF NOT EXISTS '{{ db_user }}'@'localhost' IDENTIFIED BY '{{ db_password }}';
+         GRANT ALL PRIVILEGES ON \`{{ db_name }}\`.* TO '{{ db_user }}'@'localhost';
+         FLUSH PRIVILEGES;"
 
-    - name: Create user + grant privileges (optional)
-      when: db_vars_provided
-      shell: |
-        mysql --user=root --password="{{ mysql_root_password }}" --execute="CREATE USER IF NOT EXISTS '{{ db_user }}'@'%' IDENTIFIED BY '{{ db_password }}';
-        GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_user }}'@'%';
-        FLUSH PRIVILEGES;"
-      changed_when: true
-
-    - name: Validation - MariaDB version
-      command: mysql --user=root --password={{ mysql_root_password }} -e "SELECT VERSION();"
+    # -----------------------------
+    # Validation output
+    # -----------------------------
+    - name: Show MariaDB version
+      command: mariadb --version
       register: mariadb_version
       changed_when: false
 
-    - name: Print status
+    - name: Print MariaDB version
       debug:
-        msg: "MariaDB OK. {{ mariadb_version.stdout_lines | default([]) }}"
+        var: mariadb_version.stdout
+
+    - name: Print login hints
+      debug:
+        msg:
+          - "Root login (socket): sudo mariadb"
+          - "Admin login (password): mariadb -u admin -p  (password is dbCustomPassword or 'rootroot')"
