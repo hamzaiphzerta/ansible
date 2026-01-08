@@ -23,7 +23,7 @@
       when: ansible_os_family == "Debian"
 
     # -----------------------
-    # Docker install (safe)
+    # Docker install 
     # -----------------------
     - name: Check if Docker exists
       stat:
@@ -54,28 +54,24 @@
         append: yes
 
     # -----------------------
-    # Install Coolify (CORRECT WAY)
+    # Install Coolify
     # -----------------------
-    - name: Install Coolify (non-interactive FIXED)
+    - name: Install Coolify (non-interactive)
       shell: |
         export COOLIFY_NON_INTERACTIVE=true
         curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
       args:
         executable: /bin/bash
-      async: 1800
-      poll: 30
-      register: coolify_install
-      failed_when: false
 
     # -----------------------
-    # Verify Coolify really started
+    # Wait for any Coolify container to start
     # -----------------------
-    - name: Wait for Coolify container
-      shell: docker ps --format '{{ "{{" }}.Names{{ "}}" }}' | grep -q coolify
+    - name: Wait for Coolify container to appear
+      shell: docker ps --format '{{"{{.Names}}"}}' | grep coolify
       register: coolify_check
-      retries: 12
-      delay: 10
-      until: coolify_check.rc == 0
+      retries: 20        
+      delay: 15
+      until: coolify_check.stdout != ""
 
     # -----------------------
     # Final message
