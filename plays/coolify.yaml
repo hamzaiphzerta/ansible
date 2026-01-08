@@ -9,7 +9,7 @@
 
   tasks:
     # -----------------------
-    # Install basic dependencies
+    # Install basic deps
     # -----------------------
     - name: Install dependencies
       apt:
@@ -23,7 +23,7 @@
       when: ansible_os_family == "Debian"
 
     # -----------------------
-    # Docker install
+    # Docker install 
     # -----------------------
     - name: Check if Docker exists
       stat:
@@ -54,24 +54,34 @@
         append: yes
 
     # -----------------------
-    # Install Coolify (non-interactive)
+    # Install Coolify
     # -----------------------
-    - name: Install Coolify
+    - name: Install Coolify (non-interactive)
       shell: |
         export COOLIFY_NON_INTERACTIVE=true
         curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
       args:
         executable: /bin/bash
+      async: 1800
+      poll: 30
+      register: coolify_install
 
     # -----------------------
     # Wait for any Coolify container to start
     # -----------------------
     - name: Wait for Coolify container to appear
-      shell: docker ps --format '{{"{{.Image}}"}}' | grep coolify
+      shell: docker ps --format '{{"{{.Names}}"}} {{ "{{.Image}}" }}' | grep -i coolify
       register: coolify_check
-      retries: 20        # wait longer on Morpheus
-      delay: 15
-      until: coolify_check.stdout != ""
+      retries: 30        # give Morpheus VM enough time cuz he need it 
+      delay: 20
+      until: coolify_check.rc == 0
+
+    # -----------------------
+    # Optional: show containers if failed (for debugging)
+    # -----------------------
+    - name: Show running containers if Coolify not found
+      shell: docker ps
+      when: coolify_check.rc != 0
 
     # -----------------------
     # Final message
@@ -79,6 +89,5 @@
     - name: Coolify installed
       debug:
         msg: "✅ Coolify is running. Access it on port {{ coolify_port }}"
-
 
 
