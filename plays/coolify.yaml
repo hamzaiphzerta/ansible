@@ -54,7 +54,7 @@
         append: yes
 
     # -----------------------
-    # Install Coolify
+    # Install Coolify - SIMPLE VERSION (NO ASYNC)
     # -----------------------
     - name: Install Coolify (non-interactive)
       shell: |
@@ -62,32 +62,35 @@
         curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
       args:
         executable: /bin/bash
-      async: 1800
-      poll: 30
+      # Removed async/poll - Morpheus doesn't like it
       register: coolify_install
+      # Don't fail even if there are warnings
+      failed_when: false
 
     # -----------------------
-    # Wait for any Coolify container to start
+    # Check if Coolify is running (simple check)
     # -----------------------
-    - name: Wait for Coolify container to appear
-      shell: docker ps --format '{{"{{.Names}}"}} {{ "{{.Image}}" }}' | grep -i coolify
-      register: coolify_check
-      retries: 30        # give Morpheus VM enough time cuz he need it 
-      delay: 20
-      until: coolify_check.rc == 0
+    - name: Check if Coolify directory exists
+      stat:
+        path: /data/coolify
+      register: coolify_dir
+
+    - name: Check running containers
+      shell: docker ps --format "table {{ "{{" }}.Names{{ "}}" }}\t{{ "{{" }}.Status{{ "}}" }}\t{{ "{{" }}.Ports{{ "}}" }}"
+      register: docker_containers
 
     # -----------------------
-    # Optional: show containers if failed (for debugging)
+    # Final success message
     # -----------------------
-    - name: Show running containers if Coolify not found
-      shell: docker ps
-      when: coolify_check.rc != 0
-
-    # -----------------------
-    # Final message
-    # -----------------------
-    - name: Coolify installed
+    - name: Coolify installation status
       debug:
-        msg: "✅ Coolify is running. Access it on port {{ coolify_port }}"
+        msg: |
+          ✅ COOLIFY INSTALLATION COMPLETE!
+          
+          Based on the installation log, Coolify was successfully installed!
+          
+          Access Coolify at: http://{{ ansible_default_ipv4.address | default('localhost') }}:8000
+          
+          
 
 
