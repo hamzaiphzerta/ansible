@@ -1,35 +1,73 @@
----
-- name: Install Cockpit on Ubuntu
+- name: Install & Secure Redis on Ubuntu 24.04
   hosts: all
-  become: yes
-  collections:
-    - community.general
+  become: true
+  gather_facts: true
+
+  vars:
+    redis_port: 6379
+    redis_bind: "127.0.0.1"
+    redis_password: "StrongChangeMe123!"
+    redis_maxmemory: "512mb"
+    redis_policy: "allkeys-lru"
 
   tasks:
-    - name: Configure resolv.conf with Google DNS
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-
-    - name: Clear apt proxy settings
-      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
-
     - name: Update apt cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install Cockpit
+    - name: Install Redis
       apt:
-        name: cockpit
+        name: redis-server
         state: present
 
-    - name: Enable and start Cockpit service
+    - name: Stop Redis before configuration
       systemd:
-        name: cockpit
+        name: redis-server
+        state: stopped
+
+    - name: Configure Redis securely
+      blockinfile:
+        path: /etc/redis/redis.conf
+        marker: "# {mark} REDIS MANAGED BLOCK"
+        block: |
+          bind {{ redis_bind }}
+          port {{ redis_port }}
+          protected-mode yes
+          supervised systemd
+
+          requirepass {{ redis_password }}
+
+          maxmemory {{ redis_maxmemory }}
+          maxmemory-policy {{ redis_policy }}
+
+          appendonly yes
+        backup: yes
+
+    - name: Set Redis config permissions
+      file:
+        path: /etc/redis/redis.conf
+        owner: redis
+        group: redis
+        mode: '0640'
+
+    - name: Start Redis
+      systemd:
+        name: redis-server
         enabled: yes
         state: started
 
-    - name: Allow Cockpit port 9090 through UFW
-      community.general.ufw:
-        rule: allow
-        port: 9090
-        proto: tcp
+    - name: Wait for Redis to be available
+      wait_for:
+        port: "{{ redis_port }}"
+        timeout: 60
+
+    - name: Verify Redis authentication
+      command: redis-cli -a "{{ redis_password }}" ping
+      register: redis_ping
+      changed_when: false
+
+    - name: Display Redis status
+      debug:
+        msg: "Redis is running and secured: {{ redis_ping.stdout }}"
+
