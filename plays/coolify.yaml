@@ -54,7 +54,7 @@
         append: yes
 
     # -----------------------
-    # Install Coolify - SIMPLE VERSION (NO ASYNC)
+    # Install Coolify - SIMPLE VERSION (NO ASYNC cuz it fails with ansible )
     # -----------------------
     - name: Install Coolify (non-interactive)
       shell: |
@@ -68,7 +68,7 @@
       failed_when: false
 
     # -----------------------
-    # Check if Coolify is running (simple check)
+    # Check if Coolify is running 
     # -----------------------
     - name: Check if Coolify directory exists
       stat:
