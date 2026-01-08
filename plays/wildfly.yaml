@@ -1,5 +1,5 @@
 ---
-- name: Install WildFly
+- name: Install WildFly ubuntu 24.04
   hosts: all
   become: true
   gather_facts: true

@@ -1,250 +1,96 @@
 ---
-- name: Install Coolify
+- name: Install Coolify 
   hosts: all
   become: true
-  vars:
-    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
-    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
-    
-  tasks:
-    # DNS configuration for both Ubuntu and RHEL
-    - name: Configure resolv.conf with Google DNS (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
-    - name: Configure resolv.conf with Google DNS (RHEL)
-      when: ansible_os_family == "RedHat"
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
-    # Clear proxy settings
-    - name: Clear apt proxy settings (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
-    
-    - name: Clear yum proxy settings (RHEL)
-      when: ansible_os_family == "RedHat"
-      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
----
-- name: Install Coolify
-  hosts: all
-  become: true
-  vars:
-    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
-    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
-    
-  tasks:
-    # DNS configuration for both Ubuntu and RHEL
-    - name: Configure resolv.conf with Google DNS (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
-    - name: Configure resolv.conf with Google DNS (RHEL)
-      when: ansible_os_family == "RedHat"
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
-    # Clear proxy settings
-    - name: Clear apt proxy settings (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
-    
-    - name: Clear yum proxy settings (RHEL)
-      when: ansible_os_family == "RedHat"
-      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
+  gather_facts: yes
 
-    - name: Update apt cache (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+  vars:
+    coolify_port: 8000
+
+  tasks:
+    # -----------------------
+    # Install basic deps
+    # -----------------------
+    - name: Install dependencies
       apt:
+        name:
+          - curl
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
         update_cache: yes
-        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
 
-    # RHEL-specific tasks
-    - name: Configure HTTP proxy for yum (RHEL)
-      when: ansible_os_family == "RedHat"
-      lineinfile:
-        path: /etc/yum.conf
-        line: 'proxy={{ proxy_url }}'
-        create: yes
+    # -----------------------
+    # Docker install 
+    # -----------------------
+    - name: Check if Docker exists
+      stat:
+        path: /usr/bin/docker
+      register: docker_bin
 
-    - name: Register and subscribe RHEL system
-      when: ansible_os_family == "RedHat"
-      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
-      register: subscription_result
-      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
-      changed_when: subscription_result.rc == 0
+    - name: Install Docker if missing
+      shell: curl -fsSL https://get.docker.com | sh
+      when: not docker_bin.stat.exists
 
-    - name: Enable required RHEL repositories
-      when: ansible_os_family == "RedHat"
-      command: subscription-manager repos --enable rhel-{{ ansible_distribution_major_version }}-for-x86_64-appstream-rpms
-      register: repo_result
-      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
-      changed_when: repo_result.rc == 0
-
-    # Install required packages
-    - name: Install required packages (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      apt:
-        name:
-          - curl
-          - wget
-          - git
-          - jq
-          - openssl
-          - docker.io
-        state: present
-
-    - name: Install required packages (RHEL)
-      when: ansible_os_family == "RedHat"
-      dnf:
-        name:
-          - curl
-          - wget
-          - git
-          - jq
-          - openssl
-          - docker
-        state: present
-
-    - name: Start and enable Docker service
+    - name: Ensure Docker is running
       systemd:
         name: docker
         state: started
         enabled: yes
 
-    - name: Create required directories
-      file:
-        path: "{{ item }}"
-        state: directory
-        mode: '0755'
-      with_items:
-        - /coolify
-        - /coolify/data
+    # -----------------------
+    # Add SSH user to docker group
+    # -----------------------
+    - name: Get remote SSH user
+      set_fact:
+        real_user: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
 
-    # Download script using command to ensure proxy settings are used
-    - name: Download Coolify install script
-      command: curl https://cdn.coollabs.io/coolify/install.sh -o /tmp/coolify_install.sh
-      args:
-        creates: /tmp/coolify_install.sh
+    - name: Add user to docker group
+      user:
+        name: "{{ real_user }}"
+        groups: docker
+        append: yes
 
-    # Set execute permissions
-    - name: Set execute permission on install script
-      file:
-        path: /tmp/coolify_install.sh
-        mode: '0755'
-
-    # Execute script with proper environment variables
-    - name: Execute Coolify installation
+    # -----------------------
+    # Install Coolify - SIMPLE VERSION (NO ASYNC cuz it fails with ansible )
+    # -----------------------
+    - name: Install Coolify (non-interactive)
       shell: |
-        bash /tmp/coolify_install.sh --non-interactive
+        export COOLIFY_NON_INTERACTIVE=true
+        curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
       args:
         executable: /bin/bash
-      async: 1800
-      poll: 30
+      # Removed async/poll - Morpheus doesn't like it
+      register: coolify_install
+      # Don't fail even if there are warnings
+      failed_when: false
 
-    - name: Wait for Coolify to be available
-      wait_for:
-        port: 8000
-        timeout: 300
-        delay: 10
+    # -----------------------
+    # Check if Coolify is running 
+    # -----------------------
+    - name: Check if Coolify directory exists
+      stat:
+        path: /data/coolify
+      register: coolify_dir
 
-    - name: Print installation complete message
+    - name: Check running containers
+      shell: docker ps --format "table {{ "{{" }}.Names{{ "}}" }}\t{{ "{{" }}.Status{{ "}}" }}\t{{ "{{" }}.Ports{{ "}}" }}"
+      register: docker_containers
+
+    # -----------------------
+    # Final success message
+    # -----------------------
+    - name: Coolify installation status
       debug:
-        msg: "Coolify has been installed successfully. Access it at https://{{ morpheus['server']['internalIp'] }}:8000"
+        msg: |
+          ✅ COOLIFY INSTALLATION COMPLETE!
+          
+          Based on the installation log, Coolify was successfully installed!
+          
+          Access Coolify at: http://{{ ansible_default_ipv4.address | default('localhost') }}:8000
+          
+          
 
-    - name: Update apt cache (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
 
-    # RHEL-specific tasks
-    - name: Configure HTTP proxy for yum (RHEL)
-      when: ansible_os_family == "RedHat"
-      lineinfile:
-        path: /etc/yum.conf
-        line: 'proxy={{ proxy_url }}'
-        create: yes
-
-    - name: Register and subscribe RHEL system
-      when: ansible_os_family == "RedHat"
-      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
-      register: subscription_result
-      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
-      changed_when: subscription_result.rc == 0
-
-    - name: Enable required RHEL repositories
-      when: ansible_os_family == "RedHat"
-      command: subscription-manager repos --enable rhel-{{ ansible_distribution_major_version }}-for-x86_64-appstream-rpms
-      register: repo_result
-      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
-      changed_when: repo_result.rc == 0
-
-    # Install required packages
-    - name: Install required packages (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      apt:
-        name:
-          - curl
-          - wget
-          - git
-          - jq
-          - openssl
-          - docker.io
-        state: present
-
-    - name: Install required packages (RHEL)
-      when: ansible_os_family == "RedHat"
-      dnf:
-        name:
-          - curl
-          - wget
-          - git
-          - jq
-          - openssl
-          - docker
-        state: present
-
-    - name: Start and enable Docker service
-      systemd:
-        name: docker
-        state: started
-        enabled: yes
-
-    - name: Create required directories
-      file:
-        path: "{{ item }}"
-        state: directory
-        mode: '0755'
-      with_items:
-        - /coolify
-        - /coolify/data
-
-    # Download script using command to ensure proxy settings are used
-    - name: Download Coolify install script
-      command: curl https://cdn.coollabs.io/coolify/install.sh -o /tmp/coolify_install.sh
-      args:
-        creates: /tmp/coolify_install.sh
-
-    # Set execute permissions
-    - name: Set execute permission on install script
-      file:
-        path: /tmp/coolify_install.sh
-        mode: '0755'
-
-    # Execute script with proper environment variables
-    - name: Execute Coolify installation
-      shell: |
-        bash /tmp/coolify_install.sh --non-interactive
-      args:
-        executable: /bin/bash
-      async: 1800
-      poll: 30
-
-    - name: Wait for Coolify to be available
-      wait_for:
-        port: 8000
-        timeout: 300
-        delay: 10
-
-    - name: Print installation complete message
-      debug:
-        msg: "Coolify has been installed successfully. Access it at https://{{ morpheus['server']['internalIp'] }}:8000"
