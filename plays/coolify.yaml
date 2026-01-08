@@ -1,58 +1,87 @@
-- name: Install Coolify (Minimal & Robust)
+  GNU nano 7.2                                                                                                                                                                                                                     coolify.yml                                                                                                                                                                                                                              
+---
+- name: Install Coolify (Robust – Morpheus & Ubuntu)
   hosts: all
   become: true
+  gather_facts: yes
+
   vars:
     coolify_port: 8000
 
   tasks:
-    # Install Docker if missing
-    - name: Check if Docker is installed
+    # -----------------------
+    # Install basic deps
+    # -----------------------
+    - name: Install dependencies
+      apt:
+        name:
+          - curl
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    # -----------------------
+    # Docker install (safe)
+    # -----------------------
+    - name: Check if Docker exists
       stat:
         path: /usr/bin/docker
-      register: docker_check
+      register: docker_bin
 
     - name: Install Docker if missing
       shell: curl -fsSL https://get.docker.com | sh
-      when: not docker_check.stat.exists
-      retries: 2
+      when: not docker_bin.stat.exists
 
-    # Start Docker (ALWAYS needed)
     - name: Ensure Docker is running
       systemd:
         name: docker
         state: started
         enabled: yes
 
-    # Add user to group if needed
-    - name: Check Docker group membership
-      shell: id -nG "{{ ansible_user }}" | grep -q docker && echo "in_group" || echo "not_in_group"
-      register: group_check
-      changed_when: false
+    # -----------------------
+    # Add SSH user to docker group
+    # -----------------------
+    - name: Get remote SSH user
+      set_fact:
+        real_user: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
 
-    - name: Add to Docker group if needed
+    - name: Add user to docker group
       user:
-        name: "{{ ansible_user }}"
+        name: "{{ real_user }}"
         groups: docker
         append: yes
-      when: "'in_group' not in group_check.stdout"
 
-    # Run installer (idempotent - checks if already installed)
-    - name: Check if Coolify is already running
+    # -----------------------
+    # Install Coolify (CORRECT WAY)
+    # -----------------------
+    - name: Install Coolify (non-interactive FIXED)
       shell: |
-        docker ps --filter "name=coolify" --quiet | head -1
-      register: coolify_check
-      changed_when: false
-
-    - name: Install Coolify if not present
-      shell: |
-        curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash -s -- --non-interactive
-      when: coolify_check.stdout == ""
+        export COOLIFY_NON_INTERACTIVE=true
+        curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
+      args:
+        executable: /bin/bash
       async: 1800
       poll: 30
+      register: coolify_install
+      failed_when: false
 
-    # Verify
-    - name: Verify Coolify is accessible
-      wait_for:
-        port: "{{ coolify_port }}"
-        timeout: 120
-      when: coolify_check.stdout == ""
+    # -----------------------
+    # Verify Coolify really started
+    # -----------------------
+    - name: Wait for Coolify container
+      shell: docker ps --format '{{ "{{" }}.Names{{ "}}" }}' | grep -q coolify
+      register: coolify_check
+      retries: 12
+      delay: 10
+      until: coolify_check.rc == 0
+
+    # -----------------------
+    # Final message
+    # -----------------------
+    - name: Coolify installed
+      debug:
+        msg: "✅ Coolify is running. Access it on port {{ coolify_port }}"
+
