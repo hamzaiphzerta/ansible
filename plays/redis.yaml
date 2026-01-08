@@ -1,11 +1,11 @@
-- name: Install & Secure Redis on Ubuntu 24.04
+- name: Install & Secure Redis 6+ on Ubuntu 24.04
   hosts: all
   become: true
   gather_facts: true
 
   vars:
     redis_port: 6379
-    redis_bind: "127.0.0.1" #Redis is accessible ONLY from the same machine , u can change it to a  prv @ ( better option) wla 0.0.0.0
+    redis_bind: "127.0.0.1"  # Redis is accessible ONLY from the same machine. Change to private IP or 0.0.0.0 if needed.
     redis_password: "redis"
     redis_maxmemory: "512mb"
     redis_policy: "allkeys-lru"
@@ -26,9 +26,18 @@
         name: redis-server
         state: stopped
 
-    - name: Configure Redis securely
+    - name: Ensure Redis config file exists
+      file:
+        path: /etc/redis/redis.conf
+        state: touch
+        owner: redis
+        group: redis
+        mode: '0640'
+
+    - name: Configure Redis securely (ACL-only)
       blockinfile:
         path: /etc/redis/redis.conf
+        create: yes
         marker: "# {mark} REDIS MANAGED BLOCK"
         block: |
           bind {{ redis_bind }}
@@ -36,7 +45,8 @@
           protected-mode yes
           supervised systemd
 
-          requirepass {{ redis_password }}
+          # Redis 6+ ACL for default user
+          user default on >{{ redis_password }} ~* +@all
 
           maxmemory {{ redis_maxmemory }}
           maxmemory-policy {{ redis_policy }}
@@ -50,6 +60,10 @@
         owner: redis
         group: redis
         mode: '0640'
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
 
     - name: Start Redis
       systemd:
@@ -69,5 +83,6 @@
 
     - name: Display Redis status
       debug:
-        msg: "Redis is running and secured: {{ redis_ping.stdout }}"
+        msg: "✅ Redis is running and secured: {{ redis_ping.stdout }}"
+
 
