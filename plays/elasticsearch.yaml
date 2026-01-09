@@ -1,58 +1,67 @@
 ---
-- name: Install Elasticsearch Stack
+- name: Install ELK Stack 8.x on Ubuntu 24.04
   hosts: all
   become: true
   vars:
-    elastic_version: "8.x"
+    elastic_version: "8.19.9"
+    elastic_password: "{{ morpheus.customOptions.elasticPassword | default('elastic') }}"
+    kibana_encryption_key: "{{ morpheus.customOptions.kibanaKey | default('default_super_long_kibana_key') }}" 
+    reporting_encryption_key: "{{ morpheus.customOptions.reportingKey | default('default_super_long_reporting_key') }}"         
 
   tasks:
-    # Ubuntu-specific tasks
-    - name: Install required packages (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Update apt cache
       apt:
-        name:
-          - apt-transport-https
-          - curl
-          - gnupg
-          - ca-certificates
-        state: present
         update_cache: yes
 
-    - name: Add Elasticsearch GPG key (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      ansible.builtin.apt_key:
+    - name: Install dependencies
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - apt-transport-https
+        - openjdk-17-jdk
+        - wget
+        - gnupg
+
+    - name: Add Elastic GPG key
+      apt_key:
         url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
         state: present
 
-    - name: Add Elasticsearch repository (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      ansible.builtin.apt_repository:
+    - name: Add Elastic repository
+      apt_repository:
         repo: "deb https://artifacts.elastic.co/packages/{{ elastic_version }}/apt stable main"
         state: present
         filename: "elastic-{{ elastic_version }}"
 
-    - name: Update apt cache (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Update apt cache after adding Elastic repo
       apt:
         update_cache: yes
 
-    # Common installation tasks
     - name: Install Elasticsearch, Kibana, Logstash
-      package:
-        name:
-          - elasticsearch
-          - kibana
-          - logstash
+      apt:
+        name: "{{ item }}"
         state: present
+      loop:
+        - elasticsearch
+        - kibana
+        - logstash
 
-    - name: Configure Kibana to listen on all interfaces
+    - name: Configure Kibana
       lineinfile:
         path: /etc/kibana/kibana.yml
-        regexp: '^server\.host:'
-        line: 'server.host: "0.0.0.0"'
         create: yes
+        line: "{{ item }}"
+      loop:
+        - 'server.host: "0.0.0.0"'
+        - 'elasticsearch.hosts: ["https://localhost:9200"]'
+        - 'elasticsearch.username: "elastic"'
+        - 'elasticsearch.password: "{{ elastic_password }}"'
+        - 'xpack.encryptedSavedObjects.encryptionKey: "{{ kibana_encryption_key }}"'
+        - 'xpack.reporting.encryptionKey: "{{ reporting_encryption_key }}"'
+        - 'elasticsearch.ssl.verificationMode: "none"'
 
-    - name: Ensure systemd override directory exists for Elasticsearch
+    - name: Create Elasticsearch systemd override directory
       file:
         path: /etc/systemd/system/elasticsearch.service.d
         state: directory
@@ -70,15 +79,23 @@
       systemd:
         daemon_reload: yes
 
-    - name: Start and enable Elasticsearch, Kibana, Logstash
+    - name: Enable and start Elasticsearch
       systemd:
-        name: "{{ item }}"
+        name: elasticsearch
         state: started
         enabled: yes
-      loop:
-        - elasticsearch
-        - kibana
-        - logstash
+
+    - name: Enable and start Kibana
+      systemd:
+        name: kibana
+        state: started
+        enabled: yes
+
+    - name: Enable and start Logstash
+      systemd:
+        name: logstash
+        state: started
+        enabled: yes
 
     - name: Wait for Elasticsearch to start
       wait_for:
@@ -86,24 +103,7 @@
         delay: 10
         timeout: 300
 
-    - name: Generate Elastic password
-      shell: "/usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic --batch"
-      register: elastic_password
-      changed_when: false
-
-    - name: Generate Kibana enrollment token
-      shell: "/usr/share/elasticsearch/bin/elasticsearch-create-enrollment-token -s kibana"
-      register: kibana_token
-      changed_when: false
-
-    - name: Display Elastic password
+    - name: Display message
       debug:
-        var: elastic_password.stdout_lines
+        msg: "ELK Stack installation complete. Access Kibana at http://<VM_IP>:5601 "
 
-    - name: Display Kibana enrollment token
-      debug:
-        var: kibana_token.stdout_lines
-
-    - name: Print installation complete message
-      debug:
-        msg: "Elasticsearch Stack has been installed successfully. Access Kibana at https://{{ ansible_host }}:5601"
