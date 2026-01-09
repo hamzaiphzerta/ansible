@@ -1,124 +1,157 @@
 ---
-- name: Install ELK Stack 8.x on Ubuntu 24.04 via Morpheus
+- name: Install Prometheus on Ubuntu 24.04
   hosts: all
   become: true
   vars:
-    elastic_version: "8.19.9"
-    elastic_password: "{{ morpheus.customOptions.elasticPassword | default('elastic') }}"
-    kibana_encryption_key: "{{ morpheus.customOptions.kibanaKey | default('default_super_long_kibana_key') }}"
-    reporting_encryption_key: "{{ morpheus.customOptions.reportingKey | default('default_super_long_reporting_key') }}"
-    proxy_url: "{{ morpheus.customOptions.proxyUrl | default('') }}"
+    prometheus_version: "2.43.0"
+    prometheus_user: prometheus
+    prometheus_group: prometheus
+    prometheus_config_dir: /etc/prometheus
+    prometheus_data_dir: /var/lib/prometheus
+    proxy_url: ""  # set if you need a proxy, otherwise leave empty
 
   tasks:
-    - name: Update apt cache
+    - name: Install required packages
       apt:
-        update_cache: yes
-      environment:
-        http_proxy: "{{ proxy_url }}"
-        https_proxy: "{{ proxy_url }}"
-
-    - name: Install dependencies
-      apt:
-        name: "{{ item }}"
+        name:
+          - wget
+          - curl
+          - tar
+          - gzip
+          - bzip2
+          - xz-utils
+          - unzip
+          - ca-certificates
         state: present
-      loop:
-        - apt-transport-https
-        - openjdk-17-jdk
-        - wget
-        - gnupg
-      environment:
-        http_proxy: "{{ proxy_url }}"
-        https_proxy: "{{ proxy_url }}"
-
-    - name: Download Elastic GPG key
-      get_url:
-        url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
-        dest: /tmp/GPG-KEY-elasticsearch
-        validate_certs: no
-      environment:
-        http_proxy: "{{ proxy_url }}"
-        https_proxy: "{{ proxy_url }}"
-
-    - name: Add Elastic GPG key locally
-      apt_key:
-        file: /tmp/GPG-KEY-elasticsearch
-        state: present
-
-    - name: Add Elastic repository
-      apt_repository:
-        repo: "deb https://artifacts.elastic.co/packages/{{ elastic_version }}/apt stable main"
-        state: present
-        filename: "elastic-{{ elastic_version }}"
-
-    - name: Update apt cache after adding Elastic repo
-      apt:
         update_cache: yes
 
-    - name: Install Elasticsearch, Kibana, Logstash
-      apt:
-        name: "{{ item }}"
+    - name: Create Prometheus system group
+      group:
+        name: "{{ prometheus_group }}"
+        system: yes
         state: present
-      loop:
-        - elasticsearch
-        - kibana
-        - logstash
 
-    - name: Configure Kibana
-      lineinfile:
-        path: /etc/kibana/kibana.yml
-        create: yes
-        line: "{{ item }}"
-      loop:
-        - 'server.host: "0.0.0.0"'
-        - 'elasticsearch.hosts: ["https://localhost:9200"]'
-        - 'elasticsearch.username: "elastic"'
-        - 'elasticsearch.password: "{{ elastic_password }}"'
-        - 'xpack.encryptedSavedObjects.encryptionKey: "{{ kibana_encryption_key }}"'
-        - 'xpack.reporting.encryptionKey: "{{ reporting_encryption_key }}"'
-        - 'elasticsearch.ssl.verificationMode: "none"'
+    - name: Create Prometheus system user
+      user:
+        name: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        system: yes
+        shell: /usr/sbin/nologin
+        create_home: no
 
-    - name: Create Elasticsearch systemd override directory
+    - name: Remove existing Prometheus archive if exists
       file:
-        path: /etc/systemd/system/elasticsearch.service.d
-        state: directory
-        mode: '0755'
+        path: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        state: absent
 
-    - name: Configure Elasticsearch service with proxy
+    - name: Download Prometheus
+      shell: |
+        curl -L {{ " -x " + proxy_url if proxy_url else "" }} \
+        https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz \
+        -o /tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz
+      args:
+        creates: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+
+    - name: Extract Prometheus
+      unarchive:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: /tmp
+        remote_src: yes
+
+    - name: Create Prometheus directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: '0755'
+      loop:
+        - "{{ prometheus_config_dir }}"
+        - "{{ prometheus_data_dir }}"
+
+    - name: Copy Prometheus binaries
       copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        remote_src: yes
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: '0755'
+      loop:
+        - prometheus
+        - promtool
+
+    - name: Copy Prometheus consoles and libraries
+      copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}/"
+        dest: "{{ prometheus_config_dir }}/{{ item }}/"
+        remote_src: yes
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+      loop:
+        - consoles
+        - console_libraries
+
+    - name: Create Prometheus configuration
+      copy:
+        dest: "{{ prometheus_config_dir }}/prometheus.yml"
         content: |
-          [Service]
-          Environment="NO_PROXY=localhost,127.0.0.1"
-        dest: /etc/systemd/system/elasticsearch.service.d/http-proxy.conf
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+
+            - job_name: 'node'
+              static_configs:
+                - targets: ['localhost:9100']
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
         mode: '0644'
 
-    - name: Reload systemd daemon
+    - name: Create Prometheus systemd service
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          User={{ prometheus_user }}
+          Group={{ prometheus_group }}
+          Type=simple
+          ExecStart=/usr/local/bin/prometheus \
+              --config.file {{ prometheus_config_dir }}/prometheus.yml \
+              --storage.tsdb.path {{ prometheus_data_dir }}/ \
+              --web.console.templates={{ prometheus_config_dir }}/consoles \
+              --web.console.libraries={{ prometheus_config_dir }}/console_libraries
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Reload systemd and start Prometheus
       systemd:
+        name: prometheus
+        state: started
+        enabled: yes
         daemon_reload: yes
 
-    - name: Enable and start Elasticsearch
-      systemd:
-        name: elasticsearch
-        state: started
-        enabled: yes
-
-    - name: Enable and start Kibana
-      systemd:
-        name: kibana
-        state: started
-        enabled: yes
-
-    - name: Enable and start Logstash
-      systemd:
-        name: logstash
-        state: started
-        enabled: yes
-
-    - name: Wait for Elasticsearch to start
+    - name: Wait for Prometheus to start
       wait_for:
-        port: 9200
-        delay: 10
-        timeout: 300
+        port: 9090
+        timeout: 60
 
-    - name: Display message
-      debug:
-        msg: "ELK Stack installation complete. Access Kibana at http://<VM_IP>:5601"
+    - name: Cleanup temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        - "/tmp/prometheus-{{ prometheus_version }}.linux-amd64"
+
