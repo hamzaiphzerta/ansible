@@ -25,12 +25,12 @@
           - apt-transport-https
         state: present
 
-    - name: Set vm.max_map_count (required by Elasticsearch)
-      sysctl:
-        name: vm.max_map_count
-        value: 262144
-        state: present
-        reload: yes
+# - name: Set vm.max_map_count (required by Elasticsearch)
+#   sysctl:
+#     name: vm.max_map_count
+#     value: 262144
+#     state: present
+#     reload: yes
 
     - name: Download Elasticsearch GPG key
       shell: |
