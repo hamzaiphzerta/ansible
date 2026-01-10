@@ -1,83 +1,58 @@
----
-- name: Install ELK Stack 8.x on Ubuntu 24.04
+- name: Install ELK Stack 8.x on Ubuntu 24.04 
   hosts: all
   become: true
+
   vars:
-    elastic_version: "8.19.9"
-    elastic_password: "{{ morpheus.customOptions.elasticPassword | default('elastic') }}"
-    kibana_encryption_key: "{{ morpheus.customOptions.kibanaKey | default('default_super_long_kibana_key') }}" 
-    reporting_encryption_key: "{{ morpheus.customOptions.reportingKey | default('default_super_long_reporting_key') }}"         
+    elastic_major: "8"
 
   tasks:
+
+    - name: Remove apt proxy if present
+      file:
+        path: /etc/apt/apt.conf.d/90curtin-aptproxy
+        state: absent
+
     - name: Update apt cache
       apt:
         update_cache: yes
 
-    - name: Install dependencies
+    - name: Install base dependencies
       apt:
-        name: "{{ item }}"
-        state: present
-      loop:
-        - apt-transport-https
-        - openjdk-17-jdk
-        - wget
-        - gnupg
-
-    - name: Add Elastic GPG key
-      apt_key:
-        url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - apt-transport-https
         state: present
 
-    - name: Add Elastic repository
+    - name: Set vm.max_map_count (required by Elasticsearch)
+      sysctl:
+        name: vm.max_map_count
+        value: 262144
+        state: present
+        reload: yes
+
+    - name: Download Elasticsearch GPG key
+      shell: |
+        curl -fsSL https://artifacts.elastic.co/GPG-KEY-elasticsearch \
+        | gpg --dearmor -o /usr/share/keyrings/elasticsearch-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/elasticsearch-keyring.gpg
+
+    - name: Add Elasticsearch repository
       apt_repository:
-        repo: "deb https://artifacts.elastic.co/packages/{{ elastic_version }}/apt stable main"
+        repo: "deb [signed-by=/usr/share/keyrings/elasticsearch-keyring.gpg] https://artifacts.elastic.co/packages/{{ elastic_major }}.x/apt stable main"
+        filename: elasticsearch
         state: present
-        filename: "elastic-{{ elastic_version }}"
 
-    - name: Update apt cache after adding Elastic repo
+    - name: Update apt cache after Elastic repo
       apt:
         update_cache: yes
 
-    - name: Install Elasticsearch, Kibana, Logstash
+    - name: Install Elasticsearch
       apt:
-        name: "{{ item }}"
+        name: elasticsearch
         state: present
-      loop:
-        - elasticsearch
-        - kibana
-        - logstash
-
-    - name: Configure Kibana
-      lineinfile:
-        path: /etc/kibana/kibana.yml
-        create: yes
-        line: "{{ item }}"
-      loop:
-        - 'server.host: "0.0.0.0"'
-        - 'elasticsearch.hosts: ["https://localhost:9200"]'
-        - 'elasticsearch.username: "elastic"'
-        - 'elasticsearch.password: "{{ elastic_password }}"'
-        - 'xpack.encryptedSavedObjects.encryptionKey: "{{ kibana_encryption_key }}"'
-        - 'xpack.reporting.encryptionKey: "{{ reporting_encryption_key }}"'
-        - 'elasticsearch.ssl.verificationMode: "none"'
-
-    - name: Create Elasticsearch systemd override directory
-      file:
-        path: /etc/systemd/system/elasticsearch.service.d
-        state: directory
-        mode: '0755'
-
-    - name: Configure Elasticsearch service with proxy
-      copy:
-        content: |
-          [Service]
-          Environment="NO_PROXY=localhost,127.0.0.1"
-        dest: /etc/systemd/system/elasticsearch.service.d/http-proxy.conf
-        mode: '0644'
-
-    - name: Reload systemd daemon
-      systemd:
-        daemon_reload: yes
 
     - name: Enable and start Elasticsearch
       systemd:
@@ -85,11 +60,33 @@
         state: started
         enabled: yes
 
+    - name: Wait for Elasticsearch
+      wait_for:
+        port: 9200
+        timeout: 300
+
+    - name: Install Kibana
+      apt:
+        name: kibana
+        state: present
+
+    - name: Configure Kibana to listen on all interfaces
+      lineinfile:
+        path: /etc/kibana/kibana.yml
+        regexp: '^server.host:'
+        line: 'server.host: "0.0.0.0"'
+        create: yes
+
     - name: Enable and start Kibana
       systemd:
         name: kibana
         state: started
         enabled: yes
+
+    - name: Install Logstash
+      apt:
+        name: logstash
+        state: present
 
     - name: Enable and start Logstash
       systemd:
@@ -97,13 +94,21 @@
         state: started
         enabled: yes
 
-    - name: Wait for Elasticsearch to start
-      wait_for:
-        port: 9200
-        delay: 10
-        timeout: 300
+    - name: Reset elastic password
+      command: /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic --batch
+      register: elastic_password
+      changed_when: false
 
-    - name: Display message
+    - name: Create Kibana enrollment token
+      command: /usr/share/elasticsearch/bin/elasticsearch-create-enrollment-token -s kibana
+      register: kibana_token
+      changed_when: false
+
+    - name: Show elastic password
       debug:
-        msg: "ELK Stack installation complete. Access Kibana at http://<VM_IP>:5601 "
+        msg: "{{ elastic_password.stdout }}"
+
+    - name: Show Kibana enrollment token
+      debug:
+        msg: "{{ kibana_token.stdout }}"
 
