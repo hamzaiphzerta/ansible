@@ -1,9 +1,10 @@
-- name: Install Jenkins on Ubuntu 24.04
+- name: Install Jenkins on Ubuntu 24.04 (Morpheus Safe)
   hosts: all
   become: true
 
   tasks:
-    - name: Remove apt proxy if exists
+
+    - name: Remove apt proxy if present
       file:
         path: /etc/apt/apt.conf.d/90curtin-aptproxy
         state: absent
@@ -12,12 +13,7 @@
       apt:
         update_cache: yes
 
-    - name: Install Java 17
-      apt:
-        name: openjdk-17-jdk
-        state: present
-
-    - name: Install required packages
+    - name: Install base packages
       apt:
         name:
           - ca-certificates
@@ -25,11 +21,17 @@
           - gnupg
         state: present
 
-    - name: Add Jenkins GPG key
-      get_url:
-        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-        dest: /usr/share/keyrings/jenkins-keyring.asc
-        mode: '0644'
+    - name: Install Java 17
+      apt:
+        name: openjdk-17-jdk
+        state: present
+
+    - name: Download Jenkins GPG key (curl – Morpheus safe)
+      shell: |
+        curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key \
+        -o /usr/share/keyrings/jenkins-keyring.asc
+      args:
+        creates: /usr/share/keyrings/jenkins-keyring.asc
 
     - name: Add Jenkins repository
       apt_repository:
@@ -37,7 +39,7 @@
         filename: jenkins
         state: present
 
-    - name: Update apt cache after Jenkins repo
+    - name: Update apt cache after adding Jenkins repo
       apt:
         update_cache: yes
 
@@ -52,17 +54,18 @@
         state: started
         enabled: yes
 
-    - name: Wait for Jenkins to be available
+    - name: Wait for Jenkins to listen on port 8080
       wait_for:
         port: 8080
         timeout: 300
 
-    - name: Read initial admin password
+    - name: Read initial Jenkins admin password
       command: cat /var/lib/jenkins/secrets/initialAdminPassword
       register: jenkins_password
       changed_when: false
 
-    - name: Show Jenkins initial admin password
+    - name: Display Jenkins admin password
       debug:
         msg: "Jenkins admin password: {{ jenkins_password.stdout }}"
+
 
