@@ -1,4 +1,4 @@
-- name: Install Jenkins on Ubuntu 24.04 (Morpheus Safe)
+- name: Install Jenkins on Ubuntu 24.04 
   hosts: all
   become: true
 
