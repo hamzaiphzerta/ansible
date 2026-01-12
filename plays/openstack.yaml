@@ -1,5 +1,5 @@
 ---
-- name: Install OpenStack DevStack
+- name: Install OpenStack DevStack on Ubuntu 24.04
   hosts: all
   become: true
 
@@ -9,19 +9,23 @@
     devstack_dir: /opt/devstack
     local_conf_content: |
       [[local|localrc]]
-      ADMIN_PASSWORD=ACSCloud!2021!
-      DATABASE_PASSWORD=ACSCloud!2021!
-      RABBIT_PASSWORD=ACSCloud!2021!
-      SERVICE_PASSWORD=ACSCloud!2021!
+      ADMIN_PASSWORD=admin
+      DATABASE_PASSWORD=admin
+      RABBIT_PASSWORD=admin
+      SERVICE_PASSWORD=admin
       HOST_IP={{ ansible_default_ipv4.address }}
 
   tasks:
-    # Basic system setup
+    # 1. Basic system setup
     - name: Configure resolv.conf with Google DNS
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
+      copy:
+        dest: /etc/resolv.conf
+        content: "nameserver 8.8.8.8\n"
 
     - name: Clear apt proxy settings
-      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
+      copy:
+        dest: /etc/apt/apt.conf.d/90curtin-aptproxy
+        content: ""
 
     - name: Update apt cache
       apt:
@@ -40,6 +44,7 @@
           - build-essential
         state: present
 
+    # 2. Create stack user
     - name: Create 'stack' user
       user:
         name: "{{ devstack_user }}"
@@ -51,21 +56,25 @@
     - name: Allow 'stack' user passwordless sudo
       copy:
         dest: /etc/sudoers.d/99_stack_nopasswd
-        content: "stack ALL=(ALL) NOPASSWD: ALL"
+        content: "{{ devstack_user }} ALL=(ALL) NOPASSWD: ALL"
         mode: '0440'
 
+    # 3. Clone DevStack
     - name: Clone DevStack repository
       become_user: "{{ devstack_user }}"
       git:
         repo: "{{ devstack_repo }}"
         dest: "{{ devstack_dir }}"
+        version: master
 
     - name: Create local.conf with custom configuration
       become_user: "{{ devstack_user }}"
       copy:
         dest: "{{ devstack_dir }}/local.conf"
         content: "{{ local_conf_content }}"
+        mode: '0644'
 
+    # 4. Run DevStack
     - name: Run stack.sh with FORCE=yes
       become_user: "{{ devstack_user }}"
       shell: |
@@ -73,3 +82,4 @@
         FORCE=yes ./stack.sh
       args:
         executable: /bin/bash
+
