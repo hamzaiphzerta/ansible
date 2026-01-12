@@ -1,7 +1,7 @@
----
-- name: Install MinIO on Ubuntu 24.04
+- name: Install MinIO on Ubuntu 24.04 (Morpheus-safe)
   hosts: all
   become: true
+
   vars:
     minio_home: /opt/minio
     minio_user: minio
@@ -64,11 +64,14 @@
         - "{{ minio_home }}"
         - "{{ minio_home }}/data"
 
-    # Download & install MinIO
-    - name: Download MinIO package
-      get_url:
-        url: "https://dl.min.io/server/minio/release/linux-amd64/archive/minio_{{ minio_version }}_amd64.deb"
-        dest: "/tmp/minio.deb"
+    # Download & install MinIO (NO get_url – Morpheus safe)
+    - name: Download MinIO package using curl
+      command: >
+        curl -fL
+        https://dl.min.io/server/minio/release/linux-amd64/archive/minio_{{ minio_version }}_amd64.deb
+        -o /tmp/minio.deb
+      args:
+        creates: /tmp/minio.deb
 
     - name: Install MinIO package
       apt:
@@ -112,25 +115,25 @@
         state: started
         enabled: yes
 
-    - name: Clean up downloaded MinIO file
+    # Cleanup
+    - name: Remove MinIO installer
       file:
         path: /tmp/minio.deb
         state: absent
 
-    - name: Wait for MinIO to start
+    - name: Wait for MinIO console
       wait_for:
         port: "{{ minio_console_port }}"
         delay: 5
         timeout: 300
 
-    - name: Show completion message
+    - name: Installation completed
       debug:
         msg:
-          - "MinIO installed successfully."
-          - "Access the MinIO console at http://<server-ip>:{{ minio_console_port }}"
-          - "Default credentials:"
+          - "MinIO installed successfully"
+          - "Console: http://<server-ip>:{{ minio_console_port }}"
           - "Username: {{ minio_root_user }}"
           - "Password: {{ minio_root_password }}"
-          - "Change these credentials after first login!"
+          - "Change credentials after first login"
 
 
