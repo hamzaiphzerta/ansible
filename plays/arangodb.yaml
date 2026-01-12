@@ -145,6 +145,36 @@
         - ufw_status.rc == 0
         - (arango_manage_ufw | bool) or ('Status: active' in ufw_status.stdout)
 
+
+        
+    - name: Check for language mismatch crash in journal (last 200 lines)
+      ansible.builtin.command: "journalctl -u arangodb3 -n 200 --no-pager"
+      register: arango_journal_check
+      changed_when: false
+      failed_when: false
+
+    - name: Stop ArangoDB if it is crash-looping
+      ansible.builtin.systemd:
+        name: arangodb3
+        state: stopped
+      when: "'does not match previously used language' in arango_journal_check.stdout"
+
+    - name: Remove ArangoDB data dirs to re-initialize cleanly (fix language mismatch)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/arangodb3
+        - /var/lib/arangodb3-apps
+      when: "'does not match previously used language' in arango_journal_check.stdout"
+
+    - name: Start ArangoDB after re-init
+      ansible.builtin.systemd:
+        name: arangodb3
+        state: started
+        enabled: true
+      when: "'does not match previously used language' in arango_journal_check.stdout"
+
     # ---- Validation ----
     - name: Wait for ArangoDB port to be reachable locally
       ansible.builtin.wait_for:
