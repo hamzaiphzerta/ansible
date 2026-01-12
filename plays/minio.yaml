@@ -1,5 +1,5 @@
 ---
-- name: Install Minio on Ubuntu 24.04
+- name: Install Minio on Ubuntu 24.04 (Morpheus)
   hosts: all
   become: true
 
@@ -8,36 +8,11 @@
     minio_user: minio
     minio_version: "20241029160148.0.0"
     minio_root_user: admin
-    
-    minio_root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['minioPw'] | default('minio') }}"
-
-  handlers:
-    - name: restart systemd-resolved
-      systemd:
-        name: systemd-resolved
-        state: restarted
+    minio_root_password: "{{ minioPw }}"   # Morpheus input variable
 
   tasks:
     # -------------------------------
-    # DNS Configuration
-    # -------------------------------
-    - name: Configure Google DNS (Ubuntu)
-      lineinfile:
-        path: /etc/systemd/resolved.conf
-        regexp: '^#?DNS='
-        line: 'DNS=8.8.8.8'
-      notify: restart systemd-resolved
-
-    # -------------------------------
-    # Clear apt proxy settings
-    # -------------------------------
-    - name: Clear apt proxy settings (Ubuntu)
-      file:
-        path: /etc/apt/apt.conf.d/90curtin-aptproxy
-        state: absent
-
-    # -------------------------------
-    # Create Minio user & directories
+    # Ensure Minio user & directories
     # -------------------------------
     - name: Create minio user
       user:
@@ -59,32 +34,26 @@
     # -------------------------------
     # Download and install Minio
     # -------------------------------
-    - name: Download Minio package (Ubuntu)
+    - name: Download Minio package
       get_url:
-        url: "https://dl.min.io/server/minio/release/linux-amd64/minio_{{ minio_version }}_amd64.deb"
+        url: "http://dl.min.io/server/minio/release/linux-amd64/minio_{{ minio_version }}_amd64.deb"
         dest: "/tmp/minio.deb"
 
-    - name: Install Minio (Ubuntu)
+    - name: Install Minio package
       apt:
         deb: /tmp/minio.deb
         state: present
 
-    - name: Find Minio binary path
-      command: "which minio"
-      register: minio_path
-      changed_when: false
-
     - name: Ensure Minio binary is in /usr/local/bin
       file:
-        src: "{{ minio_path.stdout }}"
+        src: /usr/bin/minio
         dest: /usr/local/bin/minio
         state: link
-      when: minio_path.stdout != '/usr/local/bin/minio'
 
     # -------------------------------
-    # Systemd service
+    # Create systemd service
     # -------------------------------
-    - name: Create Minio systemd service file
+    - name: Create Minio systemd service
       copy:
         dest: /etc/systemd/system/minio.service
         content: |
@@ -123,26 +92,26 @@
     # -------------------------------
     # Cleanup
     # -------------------------------
-    - name: Clean up downloaded files
+    - name: Remove temporary Minio package
       file:
         path: /tmp/minio.deb
         state: absent
-      ignore_errors: yes
 
     # -------------------------------
     # Wait for Minio console
     # -------------------------------
-    - name: Wait for Minio console to start
+    - name: Wait for Minio console port 9001
       wait_for:
         port: 9001
-        delay: 10
-        timeout: 300
+        delay: 5
+        timeout: 180
 
-    - name: Installation complete message
+    - name: Installation complete
       debug:
         msg:
-          - "Minio has been installed successfully."
-          - "Access the Minio Console at http://<server-ip>:9001"
+          - "Minio installed successfully!"
+          - "Console URL: http://<server-ip>:9001"
           - "Username: {{ minio_root_user }}"
           - "Password: {{ minio_root_password }}"
-          - "Please change these credentials after first login."
+          - "Please change the password after first login."
+
