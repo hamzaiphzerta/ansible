@@ -42,6 +42,9 @@
           - python3-pip
           - python3-dev
           - build-essential
+          - curl
+          - wget
+          - unzip
         state: present
 
     # 2. Create stack user
@@ -59,7 +62,16 @@
         content: "{{ devstack_user }} ALL=(ALL) NOPASSWD: ALL"
         mode: '0440'
 
-    # 3. Clone DevStack
+    # 3. Prepare DevStack directory
+    - name: Ensure /opt/devstack directory exists and owned by stack
+      file:
+        path: "{{ devstack_dir }}"
+        state: directory
+        owner: "{{ devstack_user }}"
+        group: "{{ devstack_user }}"
+        mode: '0755'
+
+    # 4. Clone DevStack
     - name: Clone DevStack repository
       become_user: "{{ devstack_user }}"
       git:
@@ -74,7 +86,7 @@
         content: "{{ local_conf_content }}"
         mode: '0644'
 
-    # 4. Run DevStack
+    # 5. Run DevStack
     - name: Run stack.sh with FORCE=yes
       become_user: "{{ devstack_user }}"
       shell: |
