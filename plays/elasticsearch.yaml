@@ -1,109 +1,114 @@
----
-- name: Install Elasticsearch Stack
+- name: Install ELK Stack 8.x on Ubuntu 24.04 
   hosts: all
   become: true
+
   vars:
-    elastic_version: "8.x"
+    elastic_major: "8"
 
   tasks:
-    # Ubuntu-specific tasks
-    - name: Install required packages (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+
+    - name: Remove apt proxy if present
+      file:
+        path: /etc/apt/apt.conf.d/90curtin-aptproxy
+        state: absent
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install base dependencies
       apt:
         name:
-          - apt-transport-https
+          - ca-certificates
           - curl
           - gnupg
-          - ca-certificates
-        state: present
-        update_cache: yes
-
-    - name: Add Elasticsearch GPG key (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      ansible.builtin.apt_key:
-        url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+          - apt-transport-https
         state: present
 
-    - name: Add Elasticsearch repository (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
-      ansible.builtin.apt_repository:
-        repo: "deb https://artifacts.elastic.co/packages/{{ elastic_version }}/apt stable main"
-        state: present
-        filename: "elastic-{{ elastic_version }}"
+# - name: Set vm.max_map_count (required by Elasticsearch)
+#   sysctl:
+#     name: vm.max_map_count
+#     value: 262144
+#     state: present
+#     reload: yes
 
-    - name: Update apt cache (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Download Elasticsearch GPG key
+      shell: |
+        curl -fsSL https://artifacts.elastic.co/GPG-KEY-elasticsearch \
+        | gpg --dearmor -o /usr/share/keyrings/elasticsearch-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/elasticsearch-keyring.gpg
+
+    - name: Add Elasticsearch repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/elasticsearch-keyring.gpg] https://artifacts.elastic.co/packages/{{ elastic_major }}.x/apt stable main"
+        filename: elasticsearch
+        state: present
+
+    - name: Update apt cache after Elastic repo
       apt:
         update_cache: yes
 
-    # Common installation tasks
-    - name: Install Elasticsearch, Kibana, Logstash
-      package:
-        name:
-          - elasticsearch
-          - kibana
-          - logstash
+    - name: Install Elasticsearch
+      apt:
+        name: elasticsearch
+        state: present
+
+    - name: Enable and start Elasticsearch
+      systemd:
+        name: elasticsearch
+        state: started
+        enabled: yes
+
+    - name: Wait for Elasticsearch
+      wait_for:
+        port: 9200
+        timeout: 300
+
+    - name: Install Kibana
+      apt:
+        name: kibana
         state: present
 
     - name: Configure Kibana to listen on all interfaces
       lineinfile:
         path: /etc/kibana/kibana.yml
-        regexp: '^server\.host:'
+        regexp: '^server.host:'
         line: 'server.host: "0.0.0.0"'
         create: yes
 
-    - name: Ensure systemd override directory exists for Elasticsearch
-      file:
-        path: /etc/systemd/system/elasticsearch.service.d
-        state: directory
-        mode: '0755'
-
-    - name: Configure Elasticsearch service with proxy
-      copy:
-        content: |
-          [Service]
-          Environment="NO_PROXY=localhost,127.0.0.1"
-        dest: /etc/systemd/system/elasticsearch.service.d/http-proxy.conf
-        mode: '0644'
-
-    - name: Reload systemd daemon
+    - name: Enable and start Kibana
       systemd:
-        daemon_reload: yes
-
-    - name: Start and enable Elasticsearch, Kibana, Logstash
-      systemd:
-        name: "{{ item }}"
+        name: kibana
         state: started
         enabled: yes
-      loop:
-        - elasticsearch
-        - kibana
-        - logstash
 
-    - name: Wait for Elasticsearch to start
-      wait_for:
-        port: 9200
-        delay: 10
-        timeout: 300
+    - name: Install Logstash
+      apt:
+        name: logstash
+        state: present
 
-    - name: Generate Elastic password
-      shell: "/usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic --batch"
+    - name: Enable and start Logstash
+      systemd:
+        name: logstash
+        state: started
+        enabled: yes
+
+    - name: Reset elastic password
+      command: /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic --batch
       register: elastic_password
       changed_when: false
 
-    - name: Generate Kibana enrollment token
-      shell: "/usr/share/elasticsearch/bin/elasticsearch-create-enrollment-token -s kibana"
+    - name: Create Kibana enrollment token
+      command: /usr/share/elasticsearch/bin/elasticsearch-create-enrollment-token -s kibana
       register: kibana_token
       changed_when: false
 
-    - name: Display Elastic password
+    - name: Show elastic password
       debug:
-        var: elastic_password.stdout_lines
+        msg: "{{ elastic_password.stdout }}"
 
-    - name: Display Kibana enrollment token
+    - name: Show Kibana enrollment token
       debug:
-        var: kibana_token.stdout_lines
+        msg: "{{ kibana_token.stdout }}"
 
-    - name: Print installation complete message
-      debug:
-        msg: "Elasticsearch Stack has been installed successfully. Access Kibana at https://{{ ansible_host }}:5601"
