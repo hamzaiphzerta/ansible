@@ -1,33 +1,67 @@
 ---
-- name: Install Minio on Ubuntu and RHEL
+- name: Install Minio on Ubuntu 24.04 and RHEL
   hosts: all
   become: true
+
+  # -------------------------------
+  # Prompt for Minio password
+  # -------------------------------
+  vars_prompt:
+    - name: "minio_root_password"
+      prompt: "Enter Minio root password"
+      private: yes
+
   vars:
     minio_home: /opt/minio
-    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
-    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
     minio_user: minio
     minio_version: "20241029160148.0.0"
+    minio_root_user: admin
+    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
+    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+
+  handlers:
+    - name: restart systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: restarted
 
   tasks:
-    # DNS configuration for both Ubuntu and RHEL
-    - name: Configure resolv.conf with Google DNS (Ubuntu)
+    # -------------------------------
+    # DNS Configuration
+    # -------------------------------
+    - name: Configure Google DNS (Ubuntu)
       when: ansible_distribution == "Ubuntu"
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
-    - name: Configure resolv.conf with Google DNS (RHEL)
+      lineinfile:
+        path: /etc/systemd/resolved.conf
+        regexp: '^#?DNS='
+        line: 'DNS=8.8.8.8'
+      notify: restart systemd-resolved
+
+    - name: Configure Google DNS (RHEL)
       when: ansible_os_family == "RedHat"
-      shell: echo nameserver 8.8.8.8 > /etc/resolv.conf
-    
+      lineinfile:
+        path: /etc/resolv.conf
+        regexp: '^nameserver'
+        line: 'nameserver 8.8.8.8'
+
+    # -------------------------------
     # Clear proxy settings
+    # -------------------------------
     - name: Clear apt proxy settings (Ubuntu)
       when: ansible_distribution == "Ubuntu"
-      shell: echo > /etc/apt/apt.conf.d/90curtin-aptproxy
-    
+      file:
+        path: /etc/apt/apt.conf.d/90curtin-aptproxy
+        state: absent
+
     - name: Clear yum proxy settings (RHEL)
       when: ansible_os_family == "RedHat"
-      shell: echo > /etc/yum.conf.d/90curtin-aptproxy
-    
+      file:
+        path: /etc/yum.conf.d/90curtin-aptproxy
+        state: absent
+
+    # -------------------------------
+    # Create Minio user & directories
+    # -------------------------------
     - name: Create minio user
       user:
         name: "{{ minio_user }}"
@@ -41,11 +75,13 @@
         owner: "{{ minio_user }}"
         group: "{{ minio_user }}"
         mode: '0755'
-      with_items:
+      loop:
         - "{{ minio_home }}"
         - "{{ minio_home }}/data"
 
-    # Ubuntu-specific tasks
+    # -------------------------------
+    # Ubuntu-specific installation
+    # -------------------------------
     - name: Download Minio package (Ubuntu)
       when: ansible_distribution == "Ubuntu"
       get_url:
@@ -57,9 +93,24 @@
       apt:
         deb: /tmp/minio.deb
         state: present
-      register: minio_install_ubuntu
 
-    # RHEL-specific tasks
+    - name: Find Minio binary path (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      command: "which minio"
+      register: minio_path
+      changed_when: false
+
+    - name: Ensure Minio binary is in /usr/local/bin (Ubuntu)
+      when: ansible_distribution == "Ubuntu"
+      file:
+        src: "{{ minio_path.stdout }}"
+        dest: /usr/local/bin/minio
+        state: link
+      when: minio_path.stdout != '/usr/local/bin/minio'
+
+    # -------------------------------
+    # RHEL-specific installation
+    # -------------------------------
     - name: Register and subscribe RHEL system
       when: ansible_os_family == "RedHat"
       command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
@@ -92,9 +143,10 @@
         name: /tmp/minio.rpm
         state: present
         disable_gpg_check: yes
-      register: minio_install_rhel
 
-    # Common tasks for both distributions
+    # -------------------------------
+    # Systemd service (common)
+    # -------------------------------
     - name: Create Minio systemd service file
       copy:
         dest: /etc/systemd/system/minio.service
@@ -109,9 +161,9 @@
           [Service]
           User={{ minio_user }}
           Group={{ minio_user }}
-          WorkingDirectory=/usr/local
-          Environment="MINIO_ROOT_USER=admin"
-          Environment="MINIO_ROOT_PASSWORD=Password123!"
+          WorkingDirectory={{ minio_home }}
+          Environment="MINIO_ROOT_USER={{ minio_root_user }}"
+          Environment="MINIO_ROOT_PASSWORD={{ minio_root_password }}"
           ExecStart=/usr/local/bin/minio server {{ minio_home }}/data --console-address :9001
           Restart=always
           LimitNOFILE=65536
@@ -131,27 +183,34 @@
         state: started
         enabled: yes
 
+    # -------------------------------
+    # Cleanup
+    # -------------------------------
     - name: Clean up downloaded files
       file:
         path: "{{ item }}"
         state: absent
-      with_items:
+      loop:
         - /tmp/minio.deb
         - /tmp/minio.rpm
       ignore_errors: yes
 
-    - name: Wait for Minio to start
+    # -------------------------------
+    # Wait for Minio console
+    # -------------------------------
+    - name: Wait for Minio console to start
       wait_for:
         port: 9001
         delay: 10
         timeout: 300
 
-    - name: Print installation complete message
+    - name: Installation complete message
       debug:
-        msg: 
+        msg:
           - "Minio has been installed successfully."
-          - "Access the Minio Console at https://{{ morpheus['server']['internalIp'] }}:9001"
+          - "Access the Minio Console at http://<server-ip>:9001"
           - "Default credentials:"
-          - "Username: admin"
-          - "Password: Password123!"
+          - "Username: {{ minio_root_user }}"
+          - "Password: {{ minio_root_password }}"
           - "Please change these credentials after first login."
+
