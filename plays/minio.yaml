@@ -1,23 +1,15 @@
 ---
-- name: Install Minio on Ubuntu 24.04 and RHEL
+- name: Install Minio on Ubuntu 24.04
   hosts: all
   become: true
-
-  # -------------------------------
-  # Prompt for Minio password
-  # -------------------------------
-  vars_prompt:
-    - name: "minio_root_password"
-      prompt: "Enter Minio root password"
-      private: yes
 
   vars:
     minio_home: /opt/minio
     minio_user: minio
     minio_version: "20241029160148.0.0"
     minio_root_user: admin
-    rhel_username: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelEmail'] | default('') }}"
-    rhel_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['rhelPw'] | default('') }}"
+    
+    minio_root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['minioPw'] | default('minio') }}"
 
   handlers:
     - name: restart systemd-resolved
@@ -30,33 +22,18 @@
     # DNS Configuration
     # -------------------------------
     - name: Configure Google DNS (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
       lineinfile:
         path: /etc/systemd/resolved.conf
         regexp: '^#?DNS='
         line: 'DNS=8.8.8.8'
       notify: restart systemd-resolved
 
-    - name: Configure Google DNS (RHEL)
-      when: ansible_os_family == "RedHat"
-      lineinfile:
-        path: /etc/resolv.conf
-        regexp: '^nameserver'
-        line: 'nameserver 8.8.8.8'
-
     # -------------------------------
-    # Clear proxy settings
+    # Clear apt proxy settings
     # -------------------------------
     - name: Clear apt proxy settings (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
       file:
         path: /etc/apt/apt.conf.d/90curtin-aptproxy
-        state: absent
-
-    - name: Clear yum proxy settings (RHEL)
-      when: ansible_os_family == "RedHat"
-      file:
-        path: /etc/yum.conf.d/90curtin-aptproxy
         state: absent
 
     # -------------------------------
@@ -80,28 +57,24 @@
         - "{{ minio_home }}/data"
 
     # -------------------------------
-    # Ubuntu-specific installation
+    # Download and install Minio
     # -------------------------------
     - name: Download Minio package (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
       get_url:
-        url: "https://dl.min.io/server/minio/release/linux-amd64/archive/minio_{{ minio_version }}_amd64.deb"
+        url: "https://dl.min.io/server/minio/release/linux-amd64/minio_{{ minio_version }}_amd64.deb"
         dest: "/tmp/minio.deb"
 
     - name: Install Minio (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
       apt:
         deb: /tmp/minio.deb
         state: present
 
-    - name: Find Minio binary path (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Find Minio binary path
       command: "which minio"
       register: minio_path
       changed_when: false
 
-    - name: Ensure Minio binary is in /usr/local/bin (Ubuntu)
-      when: ansible_distribution == "Ubuntu"
+    - name: Ensure Minio binary is in /usr/local/bin
       file:
         src: "{{ minio_path.stdout }}"
         dest: /usr/local/bin/minio
@@ -109,43 +82,7 @@
       when: minio_path.stdout != '/usr/local/bin/minio'
 
     # -------------------------------
-    # RHEL-specific installation
-    # -------------------------------
-    - name: Register and subscribe RHEL system
-      when: ansible_os_family == "RedHat"
-      command: subscription-manager register --username {{ rhel_username }} --password {{ rhel_password }} --auto-attach
-      register: subscription_result
-      failed_when: subscription_result.rc != 0 and 'This system is already registered' not in subscription_result.stderr
-      changed_when: subscription_result.rc == 0
-
-    - name: Enable required RHEL repositories
-      when: ansible_os_family == "RedHat"
-      command: subscription-manager repos --enable rhel-8-for-x86_64-appstream-rpms
-      register: repo_result
-      failed_when: repo_result.rc != 0 and 'already enabled' not in repo_result.stderr
-      changed_when: repo_result.rc == 0
-
-    - name: Install wget (RHEL)
-      when: ansible_os_family == "RedHat"
-      dnf:
-        name: wget
-        state: present
-
-    - name: Download Minio package (RHEL)
-      when: ansible_os_family == "RedHat"
-      get_url:
-        url: "https://dl.min.io/server/minio/release/linux-amd64/archive/minio-{{ minio_version }}-1.x86_64.rpm"
-        dest: "/tmp/minio.rpm"
-
-    - name: Install Minio (RHEL)
-      when: ansible_os_family == "RedHat"
-      dnf:
-        name: /tmp/minio.rpm
-        state: present
-        disable_gpg_check: yes
-
-    # -------------------------------
-    # Systemd service (common)
+    # Systemd service
     # -------------------------------
     - name: Create Minio systemd service file
       copy:
@@ -188,11 +125,8 @@
     # -------------------------------
     - name: Clean up downloaded files
       file:
-        path: "{{ item }}"
+        path: /tmp/minio.deb
         state: absent
-      loop:
-        - /tmp/minio.deb
-        - /tmp/minio.rpm
       ignore_errors: yes
 
     # -------------------------------
@@ -209,8 +143,6 @@
         msg:
           - "Minio has been installed successfully."
           - "Access the Minio Console at http://<server-ip>:9001"
-          - "Default credentials:"
           - "Username: {{ minio_root_user }}"
           - "Password: {{ minio_root_password }}"
           - "Please change these credentials after first login."
-
