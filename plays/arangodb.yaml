@@ -1,10 +1,10 @@
 ---
-# File: arangodb_morpheus_ubuntu24_full.yml
-# Purpose: Install + configure ArangoDB on Morpheus Ubuntu 24.04 (QCOW2)
-# Notes:
-# - Uses curl (NOT get_url) to avoid Python requests/urllib3 mismatch on some images
-# - Fixes the known crash-loop: "Specified language 'en_US' ... does not match previously used language ''"
-#   by re-initializing data dirs ONLY when that exact error is detected (safe for fresh instances)
+# File: arangodb_morpheus_ubuntu24_full_WORKING.yml
+# Target: Ubuntu 24.04 (QCOW2) in Morpheus
+# Fixes:
+# - Avoids Ansible get_url (requests/urllib3 mismatch) -> uses curl
+# - Ensures clean initialization on FIRST run to avoid template leftovers
+# - Adds robust diagnostics when systemd start fails
 
 - name: Install and configure ArangoDB on Ubuntu 24.04 (Morpheus)
   hosts: all
@@ -20,9 +20,11 @@
     arango_port: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['arangoPort'] | default('8529') }}"
     arango_enable_auth: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['arangoAuth'] | default(true) | bool }}"
 
-    # If you want ArangoDB to always start from a clean DB (dangerous for existing data),
-    # set this to true. By default we ONLY wipe if we detect the language-mismatch crash.
+    # If true -> ALWAYS wipe data dirs (dangerous for existing data)
     arango_force_reinit: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['arangoForceReinit'] | default(false) | bool }}"
+
+    # Marker to make "wipe on first run" idempotent
+    arango_init_marker: "/var/lib/arangodb3/.morpheus_initialized"
 
     # ===== Repo settings (ArangoDB 3.12 line) =====
     arango_repo_path: "arangodb312"
@@ -31,9 +33,7 @@
     arango_keyring_path: "/usr/share/keyrings/arangodb.gpg"
     arango_sources_list: "/etc/apt/sources.list.d/arangodb.list"
 
-    # ===== Optional firewall handling =====
-    # We DO NOT enable UFW by default (many Morpheus envs rely on SG/NACL).
-    # If UFW is active OR you set arango_manage_ufw=true, we add allow rule.
+    # Firewall (optional)
     arango_manage_ufw: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['arangoManageUfw'] | default(false) | bool }}"
 
   handlers:
@@ -61,7 +61,7 @@
     # -----------------------------
     # Repo key + repo (curl-based)
     # -----------------------------
-    - name: Download ArangoDB Release.key using curl (bypass python requests/urllib3)
+    - name: Download ArangoDB Release.key using curl
       ansible.builtin.shell: |
         set -euo pipefail
         curl -fsSL "{{ arango_key_url }}" -o /tmp/arangodb-Release.key
@@ -105,7 +105,14 @@
         name: arangodb3
         state: present
 
-    - name: Ensure ArangoDB service is enabled (but don't assume it is healthy yet)
+    # IMPORTANT: Stop service right away to avoid crash-loop during provisioning
+    - name: Stop ArangoDB right after install (avoid crash-loop during provisioning)
+      ansible.builtin.systemd:
+        name: arangodb3
+        state: stopped
+      failed_when: false
+
+    - name: Ensure ArangoDB enabled
       ansible.builtin.systemd:
         name: arangodb3
         enabled: true
@@ -120,7 +127,7 @@
         line: "endpoint = tcp://{{ arango_bind_ip }}:{{ arango_port }}"
       notify: restart arangodb
 
-    - name: Ensure endpoint line is NOT commented out (activate it)
+    - name: Ensure any commented endpoint line is not accidentally used (no-op safety)
       ansible.builtin.replace:
         path: /etc/arangodb3/arangod.conf
         regexp: '^\s*#\s*endpoint\s*='
@@ -134,30 +141,20 @@
         line: "authentication = {{ 'true' if arango_enable_auth else 'false' }}"
       notify: restart arangodb
 
-    - name: Restart ArangoDB to apply config changes
-      ansible.builtin.meta: flush_handlers
-
     # -----------------------------
-    # Fix crash-loop: language mismatch
+    # Clean init logic (FIRST run)
     # -----------------------------
-    - name: Read recent ArangoDB logs (for language mismatch detection)
-      ansible.builtin.command: "journalctl -u arangodb3 -n 200 --no-pager"
-      register: arango_journal_check
-      changed_when: false
-      failed_when: false
+    - name: Check if Morpheus init marker exists
+      ansible.builtin.stat:
+        path: "{{ arango_init_marker }}"
+      register: arango_marker
 
-    - name: Decide if we must re-initialize (force or language mismatch detected)
+    - name: Determine if we must re-initialize data dirs
       ansible.builtin.set_fact:
-        arango_need_reinit: "{{ arango_force_reinit or ('does not match previously used language' in arango_journal_check.stdout) }}"
+        arango_need_reinit: "{{ arango_force_reinit or (not arango_marker.stat.exists) }}"
       changed_when: false
 
-    - name: Stop ArangoDB if re-initialization is required
-      ansible.builtin.systemd:
-        name: arangodb3
-        state: stopped
-      when: arango_need_reinit
-
-    - name: Remove ArangoDB data dirs (re-initialize cleanly)
+    - name: Remove ArangoDB data dirs for first-run clean init (or forced)
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
@@ -166,19 +163,24 @@
         - /var/lib/arangodb3-apps
       when: arango_need_reinit
 
-    - name: Start ArangoDB after re-initialization (if performed)
-      ansible.builtin.systemd:
-        name: arangodb3
-        state: started
-        enabled: true
+    - name: Recreate data dirs with correct ownership (avoid permission issues)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: arangodb
+        group: arangodb
+        mode: "0700"
+      loop:
+        - /var/lib/arangodb3
+        - /var/lib/arangodb3-apps
       when: arango_need_reinit
 
     # -----------------------------
-    # Wait + Diagnostics if not listening
+    # Start service (with diagnostics)
     # -----------------------------
-    - name: Validate ArangoDB is listening locally (with diagnostics on failure)
+    - name: Start ArangoDB (capture logs if it fails)
       block:
-        - name: Ensure ArangoDB is started
+        - name: Start arangodb3 service
           ansible.builtin.systemd:
             name: arangodb3
             state: started
@@ -192,21 +194,15 @@
             timeout: 90
 
       rescue:
-        - name: systemd status (arangodb3)
+        - name: systemctl status arangodb3
           ansible.builtin.command: "systemctl status arangodb3 --no-pager -l"
           register: arango_status
           changed_when: false
           failed_when: false
 
-        - name: last logs (journalctl)
-          ansible.builtin.command: "journalctl -u arangodb3 -n 250 --no-pager"
+        - name: journalctl -xeu arangodb3
+          ansible.builtin.command: "journalctl -xeu arangodb3 --no-pager -n 250"
           register: arango_journal
-          changed_when: false
-          failed_when: false
-
-        - name: socket listeners
-          ansible.builtin.command: "ss -lntp"
-          register: ss_out
           changed_when: false
           failed_when: false
 
@@ -216,22 +212,40 @@
           changed_when: false
           failed_when: false
 
-        - name: Fail with real diagnostics
+        - name: socket listeners
+          ansible.builtin.command: "ss -lntp"
+          register: ss_out
+          changed_when: false
+          failed_when: false
+
+        - name: Fail with diagnostics
           ansible.builtin.fail:
             msg: |
-              ArangoDB did not start listening on 127.0.0.1:{{ arango_port }}.
+              Unable to start ArangoDB (arangodb3).
 
-              --- systemctl status arangodb3 ---
+              --- systemctl status ---
               {{ arango_status.stdout | default('') }}
 
-              --- journalctl -u arangodb3 -n 250 ---
+              --- journalctl -xeu arangodb3 (last 250) ---
               {{ arango_journal.stdout | default('') }}
 
-              --- config (endpoint/auth) ---
+              --- arangod.conf (endpoint/auth) ---
               {{ conf_lines.stdout | default('') }}
 
               --- ss -lntp ---
               {{ ss_out.stdout | default('') }}
+
+    # -----------------------------
+    # Create marker AFTER successful start (so we don't wipe again)
+    # -----------------------------
+    - name: Create Morpheus init marker after successful start
+      ansible.builtin.file:
+        path: "{{ arango_init_marker }}"
+        state: touch
+        owner: arangodb
+        group: arangodb
+        mode: "0600"
+      when: arango_need_reinit
 
     # -----------------------------
     # Root password (idempotent)
@@ -272,9 +286,9 @@
         - (arango_manage_ufw | bool) or ('Status: active' in ufw_status.stdout)
 
     # -----------------------------
-    # Final verification + output
+    # Final verification
     # -----------------------------
-    - name: Final check ArangoDB answers locally (HTTP)
+    - name: Verify HTTP version endpoint locally
       ansible.builtin.shell: |
         set -euo pipefail
         curl -fsS "http://127.0.0.1:{{ arango_port }}/_api/version" | head -c 500
@@ -290,4 +304,4 @@
           - "Web UI: http://<server-ip>:{{ arango_port }}"
           - "Root user: root"
           - "Auth enabled: {{ arango_enable_auth }}"
-          - "Local version endpoint output (truncated): {{ arango_version_http.stdout }}"
+          - "Version endpoint output (truncated): {{ arango_version_http.stdout }}"
