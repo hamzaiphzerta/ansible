@@ -1,16 +1,6 @@
 ---
-# File: arangodb_morpheus_ubuntu24.yml
-# Target OS: Ubuntu 24.04 (Noble) image (QCOW2) deployed by Morpheus
-#
-# What it does:
-# - Adds official ArangoDB APT repo (3.12 by default), using modern signed-by keyring
-# - Installs arangodb3
-# - Configures bind endpoint + authentication
-# - Sets/ensures root password (idempotent check)
-# - Enables + starts service, waits for port 8529
-#
-# Notes:
-# - Repo base used here is the official download host (DEBIAN repo) for 3.12: https://download.arangodb.com/arangodb312/DEBIAN/ :contentReference[oaicite:0]{index=0}
+# File: arangodb_morpheus_ubuntu24_fixed.yml
+# Fix: avoids ansible get_url (requests/urllib3 mismatch on some images) by using curl
 
 - name: Install and configure ArangoDB on Ubuntu 24.04 (Morpheus)
   hosts: all
@@ -20,23 +10,20 @@
   vars:
     ansible_python_interpreter: /usr/bin/python3
 
-    # ===== Morpheus-friendly inputs (override via Morpheus customOptions if you want) =====
+    # Morpheus overrides (optional)
     arango_root_password: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['arangoRootPassword'] | default('ChangeMe_Strong_Passw0rd!') }}"
     arango_bind_ip: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['arangoBindIp'] | default('0.0.0.0') }}"
     arango_port: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['arangoPort'] | default('8529') }}"
     arango_enable_auth: "{{ hostvars[inventory_hostname]['morpheus']['customOptions']['arangoAuth'] | default(true) | bool }}"
 
-    # ===== Repo settings =====
-    # ArangoDB 3.12 repository path (change if you need another major line)
+    # ArangoDB repo (3.12 line)
     arango_repo_path: "arangodb312"
     arango_repo_url: "https://download.arangodb.com/{{ arango_repo_path }}/DEBIAN/"
     arango_key_url: "https://download.arangodb.com/{{ arango_repo_path }}/DEBIAN/Release.key"
     arango_keyring_path: "/usr/share/keyrings/arangodb.gpg"
     arango_sources_list: "/etc/apt/sources.list.d/arangodb.list"
 
-    # ===== Optional firewall handling =====
-    # We do NOT enable UFW by default (many Morpheus envs rely on SG/NACL).
-    # If UFW is already active OR you set arango_manage_ufw=true, we will add allow rule.
+    # Firewall (optional)
     arango_manage_ufw: false
 
   handlers:
@@ -58,12 +45,14 @@
         state: present
         update_cache: true
 
-    - name: Download ArangoDB repository key (Release.key)
-      ansible.builtin.get_url:
-        url: "{{ arango_key_url }}"
-        dest: /tmp/arangodb-Release.key
-        mode: "0644"
-        force: true
+    # ---- Key download WITHOUT get_url ----
+    - name: Download ArangoDB Release.key using curl (bypass python requests/urllib3)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -fsSL "{{ arango_key_url }}" -o /tmp/arangodb-Release.key
+      args:
+        executable: /bin/bash
+      changed_when: false
 
     - name: Install ArangoDB key into keyring (signed-by)
       ansible.builtin.command: >
@@ -104,13 +93,12 @@
         state: started
         enabled: true
 
-    # ---- Configuration: /etc/arangodb3/arangod.conf (ini-like) ----
+    # ---- Configure arangod.conf ----
     - name: Configure server endpoint (bind IP + port)
       ansible.builtin.lineinfile:
         path: /etc/arangodb3/arangod.conf
         regexp: '^\s*endpoint\s*='
         line: "endpoint = tcp://{{ arango_bind_ip }}:{{ arango_port }}"
-        backrefs: false
       notify: restart arangodb
 
     - name: Configure authentication
@@ -118,10 +106,9 @@
         path: /etc/arangodb3/arangod.conf
         regexp: '^\s*authentication\s*='
         line: "authentication = {{ 'true' if arango_enable_auth else 'false' }}"
-        backrefs: false
       notify: restart arangodb
 
-    - name: Restart if config changed (handler will run)
+    - name: Apply restart if config changed
       ansible.builtin.meta: flush_handlers
 
     # ---- Root password (idempotent) ----
@@ -145,21 +132,21 @@
     - name: Apply restart after password set (if needed)
       ansible.builtin.meta: flush_handlers
 
-    # ---- Optional firewall rule ----
-    - name: Check if ufw exists
+    # ---- Optional UFW rule ----
+    - name: Check ufw status (if installed)
       ansible.builtin.command: ufw status
       register: ufw_status
       changed_when: false
       failed_when: false
 
-    - name: Allow ArangoDB port in ufw (only if ufw active OR arango_manage_ufw=true)
+    - name: Allow ArangoDB port in ufw (only if active OR arango_manage_ufw=true)
       ansible.builtin.command: "ufw allow {{ arango_port }}/tcp"
       when:
         - ufw_status.rc == 0
         - (arango_manage_ufw | bool) or ('Status: active' in ufw_status.stdout)
 
     # ---- Validation ----
-    - name: Wait for ArangoDB port to be reachable
+    - name: Wait for ArangoDB port to be reachable locally
       ansible.builtin.wait_for:
         host: "127.0.0.1"
         port: "{{ arango_port | int }}"
