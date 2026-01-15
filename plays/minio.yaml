@@ -1,4 +1,4 @@
-- name: Install MinIO on Ubuntu 24.04 (Morpheus-safe)
+- name: Install MinIO on Ubuntu 24.04 
   hosts: all
   become: true
 
