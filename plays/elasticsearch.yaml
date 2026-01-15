@@ -25,13 +25,6 @@
           - apt-transport-https
         state: present
 
-# - name: Set vm.max_map_count (required by Elasticsearch)
-#   sysctl:
-#     name: vm.max_map_count
-#     value: 262144
-#     state: present
-#     reload: yes
-
     - name: Download Elasticsearch GPG key
       shell: |
         curl -fsSL https://artifacts.elastic.co/GPG-KEY-elasticsearch \
@@ -53,6 +46,16 @@
       apt:
         name: elasticsearch
         state: present
+
+    # Disable HTTPS for HTTP traffic ***************************************************
+    - name: Disable HTTPS for HTTP traffic in elasticsearch.yml
+      lineinfile:
+        path: /etc/elasticsearch/elasticsearch.yml
+        regexp: '^xpack.security.http.ssl.enabled:'
+        line: 'xpack.security.http.ssl.enabled: false'
+        create: yes
+      notify:
+        - Restart Elasticsearch
 
     - name: Enable and start Elasticsearch
       systemd:
@@ -111,4 +114,10 @@
     - name: Show Kibana enrollment token
       debug:
         msg: "{{ kibana_token.stdout }}"
+
+  handlers:
+    - name: Restart Elasticsearch
+      systemd:
+        name: elasticsearch
+        state: restarted
 
