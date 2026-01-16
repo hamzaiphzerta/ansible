@@ -1,5 +1,4 @@
 ---
----
 - name: Install WordPress on Ubuntu
   hosts: all
   become: yes
