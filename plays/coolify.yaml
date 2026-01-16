@@ -1,15 +1,17 @@
 ---
-- name: Install Coolify 
+- name: Install Coolify (Robust & Idempotent)
   hosts: all
   become: true
   gather_facts: yes
 
   vars:
     coolify_port: 8000
+    coolify_dir: /data/coolify
 
   tasks:
+
     # -----------------------
-    # Install basic deps
+    # System dependencies
     # -----------------------
     - name: Install dependencies
       apt:
@@ -23,7 +25,7 @@
       when: ansible_os_family == "Debian"
 
     # -----------------------
-    # Docker install 
+    # Docker install
     # -----------------------
     - name: Check if Docker exists
       stat:
@@ -41,56 +43,69 @@
         enabled: yes
 
     # -----------------------
-    # Add SSH user to docker group
+    # Install docker-compose plugin
     # -----------------------
-    - name: Get remote SSH user
-      set_fact:
-        real_user: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
-
-    - name: Add user to docker group
-      user:
-        name: "{{ real_user }}"
-        groups: docker
-        append: yes
+    - name: Install docker-compose plugin
+      apt:
+        name: docker-compose-plugin
+        state: present
+        update_cache: yes
 
     # -----------------------
-    # Install Coolify - SIMPLE VERSION (NO ASYNC cuz it fails with ansible )
+    # Install Coolify ONLY if not installed
     # -----------------------
-    - name: Install Coolify (non-interactive)
+    - name: Check if Coolify already installed
+      stat:
+        path: "{{ coolify_dir }}/docker-compose.yml"
+      register: coolify_compose
+
+    - name: Download Coolify installer
+      get_url:
+        url: https://cdn.coollabs.io/coolify/install.sh
+        dest: /tmp/coolify.sh
+        mode: '0755'
+      when: not coolify_compose.stat.exists
+
+    - name: Run Coolify installer (non-interactive)
       shell: |
         export COOLIFY_NON_INTERACTIVE=true
-        curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
+        /tmp/coolify.sh
       args:
         executable: /bin/bash
-      # Removed async/poll - Morpheus doesn't like it
-      register: coolify_install
-      # Don't fail even if there are warnings
-      failed_when: false
+      when: not coolify_compose.stat.exists
 
     # -----------------------
-    # Check if Coolify is running 
+    # Ensure Coolify containers are running
     # -----------------------
-    - name: Check if Coolify directory exists
-      stat:
-        path: /data/coolify
-      register: coolify_dir
-
-    - name: Check running containers
-      shell: docker ps --format "table {{ "{{" }}.Names{{ "}}" }}\t{{ "{{" }}.Status{{ "}}" }}\t{{ "{{" }}.Ports{{ "}}" }}"
-      register: docker_containers
+    - name: Start Coolify containers
+      shell: |
+        cd {{ coolify_dir }}
+        docker compose up -d
+      args:
+        executable: /bin/bash
 
     # -----------------------
-    # Final success message
+    # Verify Coolify containers
     # -----------------------
-    - name: Coolify installation status
+    - name: Verify Coolify containers
+      shell: docker ps --format "{{ '{{' }}.Names{{ '}}' }}"
+      register: running_containers
+
+    - name: Fail if Coolify is not running
+      fail:
+        msg: "❌ Coolify containers are NOT running"
+      when: "'coolify' not in running_containers.stdout"
+
+    # -----------------------
+    # Success message
+    # -----------------------
+    - name: Coolify installed successfully
       debug:
         msg: |
-          ✅ COOLIFY INSTALLATION COMPLETE!
-          
-          Based on the installation log, Coolify was successfully installed!
-          
-          Access Coolify at: http://{{ ansible_default_ipv4.address | default('localhost') }}:8000
-          
+          ✅ COOLIFY INSTALLED AND RUNNING
+          Access URL:
+          http://{{ ansible_default_ipv4.address }}:{{ coolify_port }}
+
           
 
 
