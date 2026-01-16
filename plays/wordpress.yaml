@@ -9,6 +9,7 @@
     mysql_password: wordpress
     http_host: localhost
     http_conf: wordpress.conf
+    wordpress_path: /var/www/html/wordpress
 
   tasks:
     - name: Install required packages
@@ -26,7 +27,6 @@
           - php8.3-intl
           - php8.3-zip
           - unzip
-          - python3-pymysql
         state: present
         update_cache: yes
 
@@ -39,21 +39,23 @@
         - apache2
         - mysql
 
+    # ------------------------
+    # Create MySQL database & user
+    # ------------------------
     - name: Create WordPress database
-      community.mysql.mysql_db:
-        name: "{{ mysql_database }}"
-        state: present
-        login_unix_socket: /var/run/mysqld/mysqld.sock
+      shell: "mysql -uroot -e 'CREATE DATABASE IF NOT EXISTS {{ mysql_database }};'"
 
     - name: Create WordPress MySQL user
-      community.mysql.mysql_user:
-        name: "{{ mysql_user }}"
-        password: "{{ mysql_password }}"
-        priv: "{{ mysql_database }}.*:ALL"
-        host: localhost
-        state: present
-        login_unix_socket: /var/run/mysqld/mysqld.sock
+      shell: |
+        mysql -uroot -e "
+        CREATE USER IF NOT EXISTS '{{ mysql_user }}'@'localhost' IDENTIFIED BY '{{ mysql_password }}';
+        GRANT ALL PRIVILEGES ON {{ mysql_database }}.* TO '{{ mysql_user }}'@'localhost';
+        FLUSH PRIVILEGES;
+        "
 
+    # ------------------------
+    # Download and setup WordPress
+    # ------------------------
     - name: Download WordPress
       shell: curl -fsSL https://wordpress.org/latest.tar.gz -o /tmp/wordpress.tar.gz
 
@@ -65,7 +67,7 @@
 
     - name: Set permissions
       file:
-        path: /var/www/html/wordpress
+        path: "{{ wordpress_path }}"
         owner: www-data
         group: www-data
         mode: '0755'
@@ -73,13 +75,13 @@
 
     - name: Create wp-config.php
       copy:
-        src: /var/www/html/wordpress/wp-config-sample.php
-        dest: /var/www/html/wordpress/wp-config.php
+        src: "{{ wordpress_path }}/wp-config-sample.php"
+        dest: "{{ wordpress_path }}/wp-config.php"
         remote_src: yes
 
     - name: Configure wp-config.php
       replace:
-        path: /var/www/html/wordpress/wp-config.php
+        path: "{{ wordpress_path }}/wp-config.php"
         regexp: "{{ item.regexp }}"
         replace: "{{ item.replace }}"
       loop:
@@ -87,6 +89,9 @@
         - { regexp: 'username_here', replace: "{{ mysql_user }}" }
         - { regexp: 'password_here', replace: "{{ mysql_password }}" }
 
+    # ------------------------
+    # Configure Apache
+    # ------------------------
     - name: Enable Apache rewrite
       command: a2enmod rewrite
 
@@ -96,8 +101,8 @@
         content: |
           <VirtualHost *:80>
             ServerName {{ http_host }}
-            DocumentRoot /var/www/html/wordpress
-            <Directory /var/www/html/wordpress>
+            DocumentRoot {{ wordpress_path }}
+            <Directory {{ wordpress_path }}>
               AllowOverride All
               Require all granted
             </Directory>
