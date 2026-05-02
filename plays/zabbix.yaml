@@ -6,7 +6,7 @@
   vars:
     ansible_python_interpreter: /usr/bin/python3
     zabbix_db_password: "zabbix123"
-    ansible_remote_tmp: "/var/tmp/.ansible/tmp"
+    ansible_remote_tmp: "/tmp/.ansible/tmp"
 
   tasks:
 
